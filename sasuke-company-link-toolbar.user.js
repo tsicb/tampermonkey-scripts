@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sasuke Company Link Toolbar Plus
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
-// @description  サスケ企業詳細ページにCloud Station、AI調査メニュー、テレアポガイド、Indeedリンクを追加。関連ツールへの自動入力も行う
+// @version      1.3.0
+// @description  サスケ企業詳細ページにCloud Station、AI調査メニュー、テレアポガイド、求人媒体検索メニューを追加。関連ツールへの自動入力も行う
 // @match        https://my.saaske.com/lead/cgi/*
 // @match        https://chatgpt.com/*
 // @match        https://tsicb.github.io/recruiting-competitiveness/*
@@ -27,6 +27,8 @@
   const TOOLBAR_ID = 'tm-sasuke-link-toolbar';
   const CLOUD_LINK_ID = 'tm-sasuke-cloud-link';
   const INDEED_LINK_ID = 'tm-sasuke-indeed-link';
+  const JOB_MEDIA_BUTTON_ID = 'tm-sasuke-job-media-button';
+  const JOB_MEDIA_MENU_ID = 'tm-sasuke-job-media-menu';
   const TEL_GUIDE_LINK_ID = 'tm-sasuke-tel-guide-link';
   const GPT_BUTTON_ID = 'tm-sasuke-gpt-button';
   const GPT_MENU_ID = 'tm-sasuke-gpt-menu';
@@ -34,6 +36,8 @@
   const STYLE_ID = 'tm-sasuke-links-style';
 
   const INDEED_BASE = 'https://jp.indeed.com/jobs';
+  const KYUJINBOX_BASE = 'https://xn--pckua2a7gp15o89zb.com/adv/';
+  const STANBY_BASE = 'https://jp.stanby.com/search';
   const CHATGPT_URL = 'https://chatgpt.com/';
   const CLOUD_STATION_URL = 'https://cloud-station1049.firebaseapp.com/';
   const TEL_APP_GUIDE_URL = 'https://tsicb.github.io/tel-app-guide/';
@@ -550,6 +554,28 @@
     return url.toString();
   }
 
+  function buildKyujinBoxUrl(company, location) {
+    const url = new URL(KYUJINBOX_BASE);
+    url.searchParams.set('keyword', `company:"${company}"`);
+    if (location) url.searchParams.set('area', location);
+    return url.toString();
+  }
+
+  function buildStanbyUrl(company, location) {
+    const url = new URL(STANBY_BASE);
+    url.searchParams.set('q', company);
+    if (location) url.searchParams.set('l', location);
+    return url.toString();
+  }
+
+  function buildJobMediaUrls(data) {
+    return [
+      { key: 'indeed', label: 'Indeed', url: buildIndeedUrl(data.company, data.location) },
+      { key: 'kyujinbox', label: '求人ボックス', url: buildKyujinBoxUrl(data.company, data.location) },
+      { key: 'stanby', label: 'スタンバイ', url: buildStanbyUrl(data.company, data.location) }
+    ];
+  }
+
   function collectData() {
     const company = getText(COMPANY_SELECTOR);
     const rawAddress = getText(ADDRESS_SELECTOR);
@@ -681,11 +707,11 @@
         filter: drop-shadow(0 1px 2px rgba(124, 58, 237, 0.22));
       }
 
-      #${GPT_MENU_ID} {
+      #${GPT_MENU_ID},
+      #${JOB_MEDIA_MENU_ID} {
         position: absolute;
         top: calc(100% + 6px);
-        left: 28px;
-        right: auto;
+        right: 0;
         min-width: 190px;
         padding: 6px;
         border: 1px solid #cfd8e3;
@@ -695,8 +721,25 @@
         z-index: 999999;
       }
 
-      #${GPT_MENU_ID}[hidden] {
+      #${GPT_MENU_ID} {
+        left: 28px;
+        right: auto;
+      }
+
+      #${JOB_MEDIA_MENU_ID} {
+        left: auto;
+        right: 0;
+      }
+
+      #${GPT_MENU_ID}[hidden],
+      #${JOB_MEDIA_MENU_ID}[hidden] {
         display: none !important;
+      }
+
+      .tm-sasuke-gpt-menu-separator {
+        height: 1px;
+        margin: 5px 4px;
+        background: #e4eaf1;
       }
 
       .tm-sasuke-gpt-menu-item {
@@ -839,6 +882,49 @@
     return svg;
   }
 
+  function createJobMediaSearchIcon() {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const stroke = '#1769aa';
+
+    const circle = document.createElementNS(svgNS, 'circle');
+    circle.setAttribute('cx', '10.5');
+    circle.setAttribute('cy', '10.5');
+    circle.setAttribute('r', '5.5');
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', stroke);
+    circle.setAttribute('stroke-width', '2.2');
+
+    const handle = document.createElementNS(svgNS, 'path');
+    handle.setAttribute('d', 'M14.7 14.7L20 20');
+    handle.setAttribute('fill', 'none');
+    handle.setAttribute('stroke', stroke);
+    handle.setAttribute('stroke-width', '2.4');
+    handle.setAttribute('stroke-linecap', 'round');
+
+    const dot1 = document.createElementNS(svgNS, 'circle');
+    dot1.setAttribute('cx', '8.5');
+    dot1.setAttribute('cy', '10.5');
+    dot1.setAttribute('r', '1.1');
+    dot1.setAttribute('fill', stroke);
+
+    const dot2 = document.createElementNS(svgNS, 'circle');
+    dot2.setAttribute('cx', '12.5');
+    dot2.setAttribute('cy', '10.5');
+    dot2.setAttribute('r', '1.1');
+    dot2.setAttribute('fill', stroke);
+
+    svg.appendChild(circle);
+    svg.appendChild(handle);
+    svg.appendChild(dot1);
+    svg.appendChild(dot2);
+
+    return svg;
+  }
+
   function createAiSparkleIcon() {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
@@ -936,10 +1022,25 @@
     if (menu) menu.hidden = true;
   }
 
+  function closeJobMediaMenu() {
+    const menu = document.getElementById(JOB_MEDIA_MENU_ID);
+    if (menu) menu.hidden = true;
+  }
+
   function toggleGptMenu() {
     const menu = document.getElementById(GPT_MENU_ID);
     if (!menu) return;
-    menu.hidden = !menu.hidden;
+    const willOpen = menu.hidden;
+    closeJobMediaMenu();
+    menu.hidden = !willOpen;
+  }
+
+  function toggleJobMediaMenu() {
+    const menu = document.getElementById(JOB_MEDIA_MENU_ID);
+    if (!menu) return;
+    const willOpen = menu.hidden;
+    closeGptMenu();
+    menu.hidden = !willOpen;
   }
 
   async function savePendingPrompt(prompt) {
@@ -1072,18 +1173,26 @@
     return link;
   }
 
-  function ensureIndeedButton(toolbar) {
-    let link = document.getElementById(INDEED_LINK_ID);
-    if (!link) {
-      link = document.createElement('a');
-      link.id = INDEED_LINK_ID;
-      link.className = 'tm-sasuke-link-btn';
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.appendChild(createIndeedLikeIcon());
-      toolbar.appendChild(link);
+  function ensureJobMediaButton(toolbar) {
+    let button = document.getElementById(JOB_MEDIA_BUTTON_ID);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = JOB_MEDIA_BUTTON_ID;
+      button.className = 'tm-sasuke-link-btn';
+      button.type = 'button';
+      button.title = '求人媒体検索メニューを開く';
+      button.setAttribute('aria-label', button.title);
+      button.appendChild(createJobMediaSearchIcon());
+
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleJobMediaMenu();
+      });
+
+      toolbar.appendChild(button);
     }
-    return link;
+    return button;
   }
 
   function ensureGptButton(toolbar) {
@@ -1157,6 +1266,89 @@
     return item;
   }
 
+  function openJobMediaUrl(url, label) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    showToast(`${label}を開きました`);
+    closeJobMediaMenu();
+  }
+
+  function openAllJobMediaUrls(urls) {
+    urls.forEach((item) => {
+      window.open(item.url, '_blank', 'noopener,noreferrer');
+    });
+    showToast('3媒体を開きました');
+    closeJobMediaMenu();
+  }
+
+  function createJobMediaMenuItem(item) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tm-sasuke-gpt-menu-item';
+
+    const strong = document.createElement('strong');
+    strong.textContent = item.label;
+
+    const span = document.createElement('span');
+    span.textContent = item.description || '';
+
+    button.appendChild(strong);
+    if (span.textContent) button.appendChild(span);
+
+    button.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      const data = collectData();
+      if (!data.company) {
+        showToast('企業名が取得できませんでした');
+        closeJobMediaMenu();
+        return;
+      }
+
+      const urls = buildJobMediaUrls(data);
+      if (item.key === 'all') {
+        openAllJobMediaUrls(urls);
+        return;
+      }
+
+      const selected = urls.find((urlItem) => urlItem.key === item.key);
+      if (!selected) {
+        showToast('リンクを生成できませんでした');
+        closeJobMediaMenu();
+        return;
+      }
+
+      openJobMediaUrl(selected.url, selected.label);
+    });
+
+    return button;
+  }
+
+  function ensureJobMediaMenu(toolbar) {
+    let menu = document.getElementById(JOB_MEDIA_MENU_ID);
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = JOB_MEDIA_MENU_ID;
+      menu.hidden = true;
+
+      const title = document.createElement('div');
+      title.className = 'tm-sasuke-gpt-menu-title';
+      title.textContent = '求人媒体で検索';
+
+      const separator = document.createElement('div');
+      separator.className = 'tm-sasuke-gpt-menu-separator';
+
+      menu.appendChild(title);
+      menu.appendChild(createJobMediaMenuItem({ key: 'all', label: 'すべて開く（3媒体）', description: 'Indeed・求人ボックス・スタンバイ' }));
+      menu.appendChild(separator);
+      menu.appendChild(createJobMediaMenuItem({ key: 'indeed', label: 'Indeed', description: '企業名と所在地で検索' }));
+      menu.appendChild(createJobMediaMenuItem({ key: 'kyujinbox', label: '求人ボックス', description: '企業名と所在地で検索' }));
+      menu.appendChild(createJobMediaMenuItem({ key: 'stanby', label: 'スタンバイ', description: '企業名と所在地で検索' }));
+
+      toolbar.appendChild(menu);
+    }
+    return menu;
+  }
+
   function ensureGptMenu(toolbar) {
     let menu = document.getElementById(GPT_MENU_ID);
     if (!menu) {
@@ -1197,11 +1389,11 @@
     ensureGptButton(toolbar);
     ensureGptMenu(toolbar);
     ensureTelGuideButton(toolbar);
+    ensureJobMediaButton(toolbar);
+    ensureJobMediaMenu(toolbar);
 
-    const indeedBtn = ensureIndeedButton(toolbar);
-    indeedBtn.href = buildIndeedUrl(data.company, data.location);
-    indeedBtn.title = `Indeedで開く: ${data.company} / ${data.location}`;
-    indeedBtn.setAttribute('aria-label', indeedBtn.title);
+    const oldIndeedBtn = document.getElementById(INDEED_LINK_ID);
+    if (oldIndeedBtn) oldIndeedBtn.remove();
   }
 
   function scheduleRender() {
@@ -1241,12 +1433,14 @@
       if (!toolbar) return;
       if (!toolbar.contains(event.target)) {
         closeGptMenu();
+        closeJobMediaMenu();
       }
     });
 
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') {
         closeGptMenu();
+        closeJobMediaMenu();
       }
     });
   }
