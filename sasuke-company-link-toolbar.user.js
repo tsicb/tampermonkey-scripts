@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sasuke Company Link Toolbar Plus
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
-// @description  サスケ企業詳細ページにCloud Station、AI調査メニュー、テレアポガイド、求人媒体検索メニューを追加。関連ツールへの自動入力も行う
+// @version      1.5.0
+// @description  サスケ企業詳細ページにCloud Station、運用実績分析、AI調査メニュー、求人媒体検索メニューを追加し、電話番号項目にテレアポガイドを設置。関連ツールへの自動入力も行う
 // @match        https://my.saaske.com/lead/cgi/*
 // @match        https://chatgpt.com/*
 // @match        https://tsicb.github.io/recruiting-competitiveness/*
@@ -23,9 +23,12 @@
   const COMPANY_URL_SELECTOR = '#a-dt_hp';
   const ATS_URL_SELECTOR = '#a-dt_data12';
   const EMPLOYEE_COUNT_SELECTOR = '#tg-dt_group_sb17';
+  const COMPANY_ID_SELECTOR = '#tg-dt_data15';
+  const PHONE_SELECTOR = '#tg-dt_tel';
 
   const TOOLBAR_ID = 'tm-sasuke-link-toolbar';
   const CLOUD_LINK_ID = 'tm-sasuke-cloud-link';
+  const PERFORMANCE_ANALYSIS_BUTTON_ID = 'tm-sasuke-performance-analysis-button';
   const INDEED_LINK_ID = 'tm-sasuke-indeed-link';
   const JOB_MEDIA_BUTTON_ID = 'tm-sasuke-job-media-button';
   const JOB_MEDIA_MENU_ID = 'tm-sasuke-job-media-menu';
@@ -42,6 +45,8 @@
   const CLOUD_STATION_URL = 'https://cloud-station1049.firebaseapp.com/';
   const TEL_APP_GUIDE_URL = 'https://tsicb.github.io/tel-app-guide/';
   const RECRUITING_COMPETITIVENESS_URL = 'https://tsicb.github.io/recruiting-competitiveness/';
+  const PERFORMANCE_ANALYSIS_URL = 'https://tsicb.github.io/ti-idd-perf/';
+  const PERFORMANCE_DATA_FOLDER_PATH = 'K:\\天市事業\\public\\1049\\共有情報\\tenichiプラス\\indeedマージレポート\\output_dataset';
 
   // 添付いただいた Cloud Station 32px アイコンを埋め込み。外部画像ファイル不要で動きます。
   const CLOUD_STATION_ICON_DATA_URL = 'data:image/png;base64,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';
@@ -554,10 +559,17 @@
     return url.toString();
   }
 
+  function normalizeLocationForKyujinBox(location) {
+    // 求人ボックスでは住所中の小書き「ヶ」が地域名として認識されにくいため、
+    // 求人ボックスへ渡す場合だけ通常サイズの「ケ」へ変換する。
+    return String(location || '').replace(/ヶ/g, 'ケ');
+  }
+
   function buildKyujinBoxUrl(company, location) {
     const url = new URL(KYUJINBOX_BASE);
     url.searchParams.set('keyword', `company:"${company}"`);
-    if (location) url.searchParams.set('area', location);
+    const normalizedLocation = normalizeLocationForKyujinBox(location);
+    if (normalizedLocation) url.searchParams.set('area', normalizedLocation);
     return url.toString();
   }
 
@@ -576,6 +588,13 @@
     ];
   }
 
+  function buildPerformanceAnalysisUrl(companyId) {
+    const url = new URL(PERFORMANCE_ANALYSIS_URL);
+    url.searchParams.set('source', 'sasuke');
+    if (companyId) url.searchParams.set('companyId', companyId);
+    return url.toString();
+  }
+
   function collectData() {
     const company = getText(COMPANY_SELECTOR);
     const rawAddress = getText(ADDRESS_SELECTOR);
@@ -583,6 +602,7 @@
     const website = getHref(COMPANY_URL_SELECTOR);
     const atsUrl = getHref(ATS_URL_SELECTOR);
     const employeeCount = extractEmployeeCount();
+    const companyId = getText(COMPANY_ID_SELECTOR);
 
     return {
       company,
@@ -590,7 +610,8 @@
       location,
       website,
       atsUrl,
-      employeeCount
+      employeeCount,
+      companyId
     };
   }
 
@@ -670,6 +691,45 @@
       #${CLOUD_LINK_ID} img {
         width: 19px;
         height: 19px;
+      }
+
+      .tm-sasuke-field-icon-link {
+        float: right;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        margin: -1px 0 -1px 4px;
+        padding: 0;
+        border: 1px solid #b9c8d8;
+        border-radius: 4px;
+        background: #ffffff;
+        box-sizing: border-box;
+        text-decoration: none !important;
+        cursor: pointer;
+        box-shadow: 0 1px 1px rgba(0,0,0,0.05);
+        transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+      }
+
+      .tm-sasuke-field-icon-link:hover {
+        background: #f2f7ff;
+        border-color: #7ea6d6;
+      }
+
+      .tm-sasuke-field-icon-link:active {
+        transform: translateY(1px);
+      }
+
+      .tm-sasuke-field-icon-link:focus-visible {
+        outline: 2px solid #7aa7ff;
+        outline-offset: 1px;
+      }
+
+      .tm-sasuke-field-icon-link svg {
+        width: 14px;
+        height: 14px;
+        display: block;
       }
 
       #${GPT_BUTTON_ID} {
@@ -814,6 +874,60 @@
     img.alt = '';
     img.setAttribute('aria-hidden', 'true');
     return img;
+  }
+
+  function createPerformanceAnalysisIcon() {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const bar1 = document.createElementNS(svgNS, 'rect');
+    bar1.setAttribute('x', '3');
+    bar1.setAttribute('y', '15');
+    bar1.setAttribute('width', '3.2');
+    bar1.setAttribute('height', '6');
+    bar1.setAttribute('rx', '0.8');
+    bar1.setAttribute('fill', '#93c5fd');
+
+    const bar2 = document.createElementNS(svgNS, 'rect');
+    bar2.setAttribute('x', '8.2');
+    bar2.setAttribute('y', '12');
+    bar2.setAttribute('width', '3.2');
+    bar2.setAttribute('height', '9');
+    bar2.setAttribute('rx', '0.8');
+    bar2.setAttribute('fill', '#60a5fa');
+
+    const bar3 = document.createElementNS(svgNS, 'rect');
+    bar3.setAttribute('x', '13.4');
+    bar3.setAttribute('y', '9');
+    bar3.setAttribute('width', '3.2');
+    bar3.setAttribute('height', '12');
+    bar3.setAttribute('rx', '0.8');
+    bar3.setAttribute('fill', '#2563eb');
+
+    const trend = document.createElementNS(svgNS, 'path');
+    trend.setAttribute('d', 'M3.8 11.2L8.5 6.8L12.1 9.5L20 3.6');
+    trend.setAttribute('fill', 'none');
+    trend.setAttribute('stroke', '#1d4ed8');
+    trend.setAttribute('stroke-width', '2');
+    trend.setAttribute('stroke-linecap', 'round');
+    trend.setAttribute('stroke-linejoin', 'round');
+
+    const arrow = document.createElementNS(svgNS, 'path');
+    arrow.setAttribute('d', 'M16.7 3.6H20V6.9');
+    arrow.setAttribute('fill', 'none');
+    arrow.setAttribute('stroke', '#1d4ed8');
+    arrow.setAttribute('stroke-width', '2');
+    arrow.setAttribute('stroke-linecap', 'round');
+    arrow.setAttribute('stroke-linejoin', 'round');
+
+    svg.appendChild(bar1);
+    svg.appendChild(bar2);
+    svg.appendChild(bar3);
+    svg.appendChild(trend);
+    svg.appendChild(arrow);
+    return svg;
   }
 
   function createPhoneIcon() {
@@ -1015,6 +1129,9 @@
   function removeToolbarIfExists() {
     const old = document.getElementById(TOOLBAR_ID);
     if (old) old.remove();
+
+    const telGuide = document.getElementById(TEL_GUIDE_LINK_ID);
+    if (telGuide) telGuide.remove();
   }
 
   function closeGptMenu() {
@@ -1129,6 +1246,30 @@
     closeGptMenu();
   }
 
+  function handlePerformanceAnalysisSelection() {
+    const latestData = collectData();
+    const url = buildPerformanceAnalysisUrl(latestData.companyId);
+    const copyPromise = copyToClipboard(PERFORMANCE_DATA_FOLDER_PATH);
+
+    // ポップアップブロックを避けるため、ユーザーのクリック処理中にタブを開く。
+    window.open(url, '_blank', 'noopener,noreferrer');
+    closeGptMenu();
+    closeJobMediaMenu();
+
+    Promise.resolve(copyPromise).then((copied) => {
+      if (!copied) {
+        showToast('運用実績分析を開きました（フォルダパスはコピーできませんでした）');
+        return;
+      }
+
+      showToast(
+        latestData.companyId
+          ? '運用実績分析を開き、データフォルダのパスをコピーしました'
+          : '企業IDが空欄のため通常分析で開き、データフォルダのパスをコピーしました'
+      );
+    });
+  }
+
   function ensureToolbar(companyEl) {
     let toolbar = document.getElementById(TOOLBAR_ID);
     if (!toolbar) {
@@ -1156,20 +1297,53 @@
     return link;
   }
 
-  function ensureTelGuideButton(toolbar) {
+  function ensurePerformanceAnalysisButton(toolbar) {
+    let button = document.getElementById(PERFORMANCE_ANALYSIS_BUTTON_ID);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = PERFORMANCE_ANALYSIS_BUTTON_ID;
+      button.className = 'tm-sasuke-link-btn';
+      button.type = 'button';
+      button.title = 'この企業の運用実績分析を開く';
+      button.setAttribute('aria-label', button.title);
+      button.appendChild(createPerformanceAnalysisIcon());
+
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        handlePerformanceAnalysisSelection();
+      });
+
+      toolbar.appendChild(button);
+    }
+    return button;
+  }
+
+  function ensureTelGuideButtonInPhoneLabel() {
+    const phoneEl = document.querySelector(PHONE_SELECTOR);
+    const phoneRow = phoneEl ? phoneEl.closest('tr') : null;
+    const phoneLabelCell = phoneRow ? phoneRow.querySelector('th') : null;
+    if (!phoneLabelCell) return null;
+
     let link = document.getElementById(TEL_GUIDE_LINK_ID);
     if (!link) {
       link = document.createElement('a');
       link.id = TEL_GUIDE_LINK_ID;
-      link.className = 'tm-sasuke-link-btn';
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
       link.href = TEL_APP_GUIDE_URL;
       link.title = 'テレアポガイドを開く';
       link.setAttribute('aria-label', link.title);
       link.appendChild(createPhoneIcon());
-      toolbar.appendChild(link);
     }
+
+    link.className = 'tm-sasuke-field-icon-link';
+
+    // 旧版で企業名横ツールバーに設置されていた場合も、ここで電話番号の項目名セルへ移動する。
+    if (link.parentElement !== phoneLabelCell) {
+      phoneLabelCell.appendChild(link);
+    }
+
     return link;
   }
 
@@ -1182,7 +1356,6 @@
       button.type = 'button';
       button.title = '求人媒体検索メニューを開く';
       button.setAttribute('aria-label', button.title);
-      button.appendChild(createJobMediaSearchIcon());
 
       button.addEventListener('click', function (event) {
         event.preventDefault();
@@ -1192,6 +1365,13 @@
 
       toolbar.appendChild(button);
     }
+
+    // メニューの対象は3媒体だが、入口は従来どおり認識しやすいIndeed風アイコンとする。
+    if (button.dataset.iconVersion !== 'indeed-like-v1') {
+      button.replaceChildren(createIndeedLikeIcon());
+      button.dataset.iconVersion = 'indeed-like-v1';
+    }
+
     return button;
   }
 
@@ -1386,11 +1566,12 @@
     const toolbar = ensureToolbar(companyEl);
 
     ensureCloudStationButton(toolbar);
+    ensurePerformanceAnalysisButton(toolbar);
     ensureGptButton(toolbar);
     ensureGptMenu(toolbar);
-    ensureTelGuideButton(toolbar);
     ensureJobMediaButton(toolbar);
     ensureJobMediaMenu(toolbar);
+    ensureTelGuideButtonInPhoneLabel();
 
     const oldIndeedBtn = document.getElementById(INDEED_LINK_ID);
     if (oldIndeedBtn) oldIndeedBtn.remove();
