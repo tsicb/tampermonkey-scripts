@@ -1,15 +1,18 @@
 // ==UserScript==
 // @name         Sasuke Company Link Toolbar Plus
 // @namespace    http://tampermonkey.net/
-// @version      1.5.0
-// @description  サスケ企業詳細ページにCloud Station、運用実績分析、AI調査メニュー、求人媒体検索メニューを追加し、電話番号項目にテレアポガイドを設置。関連ツールへの自動入力も行う
+// @version      1.6.0
+// @description  サスケ企業詳細ページに各種業務ツールを追加。R360 Quickへの企業名・業界連携、ChatGPT・Geminiへのプロンプト自動入力にも対応
 // @match        https://my.saaske.com/lead/cgi/*
 // @match        https://chatgpt.com/*
 // @match        https://tsicb.github.io/recruiting-competitiveness/*
+// @match        https://tsicb.github.io/R360-Quick/*
+// @match        https://gemini.google.com/*
 // @grant        GM_setClipboard
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
+// @grant        unsafeWindow
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-company-link-toolbar.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-company-link-toolbar.user.js
 // @run-at       document-idle
@@ -25,10 +28,12 @@
   const EMPLOYEE_COUNT_SELECTOR = '#tg-dt_group_sb17';
   const COMPANY_ID_SELECTOR = '#tg-dt_data15';
   const PHONE_SELECTOR = '#tg-dt_tel';
+  const INDUSTRY_SELECTOR = '#tg-dt_group_sb7';
 
   const TOOLBAR_ID = 'tm-sasuke-link-toolbar';
   const CLOUD_LINK_ID = 'tm-sasuke-cloud-link';
   const PERFORMANCE_ANALYSIS_BUTTON_ID = 'tm-sasuke-performance-analysis-button';
+  const R360_QUICK_BUTTON_ID = 'tm-sasuke-r360-quick-button';
   const INDEED_LINK_ID = 'tm-sasuke-indeed-link';
   const JOB_MEDIA_BUTTON_ID = 'tm-sasuke-job-media-button';
   const JOB_MEDIA_MENU_ID = 'tm-sasuke-job-media-menu';
@@ -42,10 +47,12 @@
   const KYUJINBOX_BASE = 'https://xn--pckua2a7gp15o89zb.com/adv/';
   const STANBY_BASE = 'https://jp.stanby.com/search';
   const CHATGPT_URL = 'https://chatgpt.com/';
+  const GEMINI_URL = 'https://gemini.google.com/app';
   const CLOUD_STATION_URL = 'https://cloud-station1049.firebaseapp.com/';
   const TEL_APP_GUIDE_URL = 'https://tsicb.github.io/tel-app-guide/';
   const RECRUITING_COMPETITIVENESS_URL = 'https://tsicb.github.io/recruiting-competitiveness/';
   const PERFORMANCE_ANALYSIS_URL = 'https://tsicb.github.io/ti-idd-perf/';
+  const R360_QUICK_URL = 'https://tsicb.github.io/R360-Quick/';
   const PERFORMANCE_DATA_FOLDER_PATH = 'K:\\天市事業\\public\\1049\\共有情報\\tenichiプラス\\indeedマージレポート\\output_dataset';
 
   // 添付いただいた Cloud Station 32px アイコンを埋め込み。外部画像ファイル不要で動きます。
@@ -58,6 +65,11 @@
   const PENDING_COMPETITIVENESS_KEY = 'tm_sasuke_pending_competitiveness';
   const PENDING_COMPETITIVENESS_TS_KEY = 'tm_sasuke_pending_competitiveness_ts';
   const COMPETITIVENESS_AUTOFILL_PARAM = 'tm_sasuke_competitiveness_autofill';
+
+  const R360_PENDING_PROMPT_KEY = 'tm_r360_pending_prompt';
+  const R360_PENDING_PROMPT_TS_KEY = 'tm_r360_pending_prompt_ts';
+  const R360_PENDING_TARGET_KEY = 'tm_r360_pending_target';
+  const R360_AUTOFILL_PARAM = 'tm_r360_autofill';
 
   const PROMPT_EXPIRE_MS = 3 * 60 * 1000;
 
@@ -333,6 +345,17 @@
     );
   }
 
+  function isR360QuickPage() {
+    return (
+      location.hostname === 'tsicb.github.io' &&
+      location.pathname.replace(/\/+$/, '') === '/R360-Quick'
+    );
+  }
+
+  function isGeminiPage() {
+    return location.hostname === 'gemini.google.com';
+  }
+
   function normalizeText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
   }
@@ -595,6 +618,14 @@
     return url.toString();
   }
 
+  function buildR360QuickUrl(data) {
+    const url = new URL(R360_QUICK_URL);
+    url.searchParams.set('source', 'sasuke');
+    if (data.company) url.searchParams.set('company', data.company);
+    if (data.industry) url.searchParams.set('industry', data.industry);
+    return url.toString();
+  }
+
   function collectData() {
     const company = getText(COMPANY_SELECTOR);
     const rawAddress = getText(ADDRESS_SELECTOR);
@@ -603,6 +634,7 @@
     const atsUrl = getHref(ATS_URL_SELECTOR);
     const employeeCount = extractEmployeeCount();
     const companyId = getText(COMPANY_ID_SELECTOR);
+    const industry = getText(INDUSTRY_SELECTOR);
 
     return {
       company,
@@ -611,7 +643,8 @@
       website,
       atsUrl,
       employeeCount,
-      companyId
+      companyId,
+      industry
     };
   }
 
@@ -930,6 +963,59 @@
     return svg;
   }
 
+  function createR360QuickIcon() {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const ring = document.createElementNS(svgNS, 'path');
+    ring.setAttribute('d', 'M18.7 7.2A8 8 0 1 0 19.8 14');
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', '#1b4f8a');
+    ring.setAttribute('stroke-width', '2.1');
+    ring.setAttribute('stroke-linecap', 'round');
+
+    const arrow = document.createElementNS(svgNS, 'path');
+    arrow.setAttribute('d', 'M16.1 4.8L19.2 7.2L16.5 10');
+    arrow.setAttribute('fill', 'none');
+    arrow.setAttribute('stroke', '#2563eb');
+    arrow.setAttribute('stroke-width', '2.1');
+    arrow.setAttribute('stroke-linecap', 'round');
+    arrow.setAttribute('stroke-linejoin', 'round');
+
+    const bar1 = document.createElementNS(svgNS, 'rect');
+    bar1.setAttribute('x', '6.4');
+    bar1.setAttribute('y', '13.8');
+    bar1.setAttribute('width', '2.4');
+    bar1.setAttribute('height', '4.1');
+    bar1.setAttribute('rx', '0.6');
+    bar1.setAttribute('fill', '#93c5fd');
+
+    const bar2 = document.createElementNS(svgNS, 'rect');
+    bar2.setAttribute('x', '10.4');
+    bar2.setAttribute('y', '10.8');
+    bar2.setAttribute('width', '2.4');
+    bar2.setAttribute('height', '7.1');
+    bar2.setAttribute('rx', '0.6');
+    bar2.setAttribute('fill', '#60a5fa');
+
+    const bar3 = document.createElementNS(svgNS, 'rect');
+    bar3.setAttribute('x', '14.4');
+    bar3.setAttribute('y', '8.2');
+    bar3.setAttribute('width', '2.4');
+    bar3.setAttribute('height', '9.7');
+    bar3.setAttribute('rx', '0.6');
+    bar3.setAttribute('fill', '#7c3aed');
+
+    svg.appendChild(ring);
+    svg.appendChild(arrow);
+    svg.appendChild(bar1);
+    svg.appendChild(bar2);
+    svg.appendChild(bar3);
+    return svg;
+  }
+
   function createPhoneIcon() {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
@@ -1198,6 +1284,27 @@
     }
   }
 
+  async function saveR360PendingPrompt(prompt, target) {
+    try {
+      await GM_setValue(R360_PENDING_PROMPT_KEY, prompt);
+      await GM_setValue(R360_PENDING_PROMPT_TS_KEY, Date.now());
+      await GM_setValue(R360_PENDING_TARGET_KEY, target);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function clearR360PendingPrompt() {
+    try {
+      await GM_deleteValue(R360_PENDING_PROMPT_KEY);
+      await GM_deleteValue(R360_PENDING_PROMPT_TS_KEY);
+      await GM_deleteValue(R360_PENDING_TARGET_KEY);
+    } catch (e) {
+      // noop
+    }
+  }
+
   async function handlePromptSelection(kind) {
     const latestData = collectData();
     if (!latestData.company) {
@@ -1270,6 +1377,25 @@
     });
   }
 
+  function handleR360QuickSelection() {
+    const latestData = collectData();
+    if (!latestData.company) {
+      showToast('企業名が取得できませんでした');
+      return;
+    }
+
+    const url = buildR360QuickUrl(latestData);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    closeGptMenu();
+    closeJobMediaMenu();
+
+    showToast(
+      latestData.industry
+        ? 'R360 Quickを企業名・業界付きで開きました'
+        : 'R360 Quickを企業名付きで開きました（★業界は空欄です）'
+    );
+  }
+
   function ensureToolbar(companyEl) {
     let toolbar = document.getElementById(TOOLBAR_ID);
     if (!toolbar) {
@@ -1312,6 +1438,28 @@
         event.preventDefault();
         event.stopPropagation();
         handlePerformanceAnalysisSelection();
+      });
+
+      toolbar.appendChild(button);
+    }
+    return button;
+  }
+
+  function ensureR360QuickButton(toolbar) {
+    let button = document.getElementById(R360_QUICK_BUTTON_ID);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = R360_QUICK_BUTTON_ID;
+      button.className = 'tm-sasuke-link-btn';
+      button.type = 'button';
+      button.title = 'R360 Quickを企業名・業界付きで開く';
+      button.setAttribute('aria-label', button.title);
+      button.appendChild(createR360QuickIcon());
+
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleR360QuickSelection();
       });
 
       toolbar.appendChild(button);
@@ -1567,6 +1715,7 @@
 
     ensureCloudStationButton(toolbar);
     ensurePerformanceAnalysisButton(toolbar);
+    ensureR360QuickButton(toolbar);
     ensureGptButton(toolbar);
     ensureGptMenu(toolbar);
     ensureJobMediaButton(toolbar);
@@ -1737,6 +1886,244 @@
     cleanupAutofillQueryParam();
   }
 
+  async function getR360ExportPrompt() {
+    try {
+      const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      if (pageWindow && typeof pageWindow.buildExportPrompt === 'function') {
+        const prompt = pageWindow.buildExportPrompt();
+        if (prompt) return String(prompt);
+      }
+    } catch (e) {
+      // fallback below
+    }
+
+    const promptButton = document.querySelector('button[onclick*="openPrmModal"]');
+    if (promptButton) promptButton.click();
+
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+      const textarea = document.querySelector('#prm-textarea');
+      if (textarea && textarea.value) {
+        const overlay = document.querySelector('#prm-overlay');
+        if (overlay) overlay.style.display = 'none';
+        return textarea.value;
+      }
+      await sleep(100);
+    }
+
+    return '';
+  }
+
+  async function handleR360AiLaunch(target) {
+    const prompt = await getR360ExportPrompt();
+    if (!prompt) {
+      showToast('プロンプトを生成できませんでした');
+      return;
+    }
+
+    const copied = await copyToClipboard(prompt);
+    await saveR360PendingPrompt(prompt, target);
+
+    const baseUrl = target === 'gemini' ? GEMINI_URL : CHATGPT_URL;
+    const url = new URL(baseUrl);
+    url.searchParams.set(R360_AUTOFILL_PARAM, '1');
+    window.open(url.toString(), '_blank', 'noopener,noreferrer');
+
+    const label = target === 'gemini' ? 'Gemini' : 'ChatGPT';
+    showToast(copied ? `${label}を開き、プロンプトをコピーしました` : `${label}を開きました`);
+  }
+
+  function createR360AiButton(target, label, background) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = `tm-r360-${target}-button`;
+    button.className = 'btn-sm btn-primary';
+    button.textContent = label;
+    button.style.background = background;
+    button.style.whiteSpace = 'nowrap';
+    button.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      handleR360AiLaunch(target);
+    });
+    return button;
+  }
+
+  function ensureR360AiButtons() {
+    const promptButton = document.querySelector('button[onclick*="openPrmModal"]');
+    if (!promptButton || !promptButton.parentElement) return false;
+
+    let chatButton = document.getElementById('tm-r360-chatgpt-button');
+    if (!chatButton) {
+      chatButton = createR360AiButton(
+        'chatgpt',
+        '✦ ChatGPTで実行',
+        'linear-gradient(135deg,#0f766e,#10a37f)'
+      );
+      promptButton.insertAdjacentElement('afterend', chatButton);
+    }
+
+    let geminiButton = document.getElementById('tm-r360-gemini-button');
+    if (!geminiButton) {
+      geminiButton = createR360AiButton(
+        'gemini',
+        '✦ Geminiで実行',
+        'linear-gradient(135deg,#2563eb,#7c3aed)'
+      );
+      chatButton.insertAdjacentElement('afterend', geminiButton);
+    }
+
+    return true;
+  }
+
+  function cleanupR360AutofillQueryParam() {
+    try {
+      const url = new URL(location.href);
+      if (!url.searchParams.has(R360_AUTOFILL_PARAM)) return;
+      url.searchParams.delete(R360_AUTOFILL_PARAM);
+      history.replaceState(null, '', url.toString());
+    } catch (e) {
+      // noop
+    }
+  }
+
+  async function readR360PendingPrompt(expectedTarget) {
+    let prompt = '';
+    let ts = 0;
+    let target = '';
+
+    try {
+      prompt = await GM_getValue(R360_PENDING_PROMPT_KEY, '');
+      ts = await GM_getValue(R360_PENDING_PROMPT_TS_KEY, 0);
+      target = await GM_getValue(R360_PENDING_TARGET_KEY, '');
+    } catch (e) {
+      return '';
+    }
+
+    if (!prompt || !ts || Date.now() - ts > PROMPT_EXPIRE_MS || target !== expectedTarget) {
+      if (ts && Date.now() - ts > PROMPT_EXPIRE_MS) await clearR360PendingPrompt();
+      return '';
+    }
+
+    return prompt;
+  }
+
+  function findGeminiComposer() {
+    const selectors = [
+      'rich-textarea div[contenteditable="true"]',
+      'div[contenteditable="true"][role="textbox"]',
+      'div.ql-editor[contenteditable="true"]',
+      'textarea'
+    ];
+
+    for (const selector of selectors) {
+      const elements = Array.from(document.querySelectorAll(selector));
+      const visible = elements.find((el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      });
+      if (visible) return visible;
+    }
+    return null;
+  }
+
+  async function waitForGeminiComposer(timeoutMs = 20000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const el = findGeminiComposer();
+      if (el) return el;
+      await sleep(300);
+    }
+    return null;
+  }
+
+  function setRichContentEditableValue(el, value) {
+    el.focus();
+
+    try {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText', false, value);
+    } catch (e) {
+      el.textContent = value;
+    }
+
+    if (!normalizeText(el.textContent)) el.textContent = value;
+    el.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      inputType: 'insertText',
+      data: value
+    }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function autofillR360ChatGptPromptIfNeeded() {
+    if (!isChatGptPage()) return false;
+
+    const url = new URL(location.href);
+    const hasParam = url.searchParams.get(R360_AUTOFILL_PARAM) === '1';
+    const prompt = await readR360PendingPrompt('chatgpt');
+    if (!prompt) {
+      if (hasParam) cleanupR360AutofillQueryParam();
+      return false;
+    }
+
+    const composer = await waitForComposer(20000);
+    if (!composer) {
+      cleanupR360AutofillQueryParam();
+      return false;
+    }
+
+    try {
+      if (composer.matches('textarea')) {
+        setTextareaValue(composer, prompt);
+      } else {
+        setContentEditableValue(composer, prompt);
+      }
+      composer.focus();
+      await clearR360PendingPrompt();
+    } catch (e) {
+      // clipboard fallback remains available
+    }
+
+    cleanupR360AutofillQueryParam();
+    return true;
+  }
+
+  async function autofillR360GeminiPromptIfNeeded() {
+    if (!isGeminiPage()) return false;
+
+    const prompt = await readR360PendingPrompt('gemini');
+    if (!prompt) {
+      cleanupR360AutofillQueryParam();
+      return false;
+    }
+
+    const composer = await waitForGeminiComposer();
+    if (!composer) {
+      cleanupR360AutofillQueryParam();
+      return false;
+    }
+
+    try {
+      if (composer.matches('textarea')) {
+        setTextareaValue(composer, prompt);
+      } else {
+        setRichContentEditableValue(composer, prompt);
+      }
+      composer.focus();
+      await clearR360PendingPrompt();
+    } catch (e) {
+      // clipboard fallback remains available
+    }
+
+    cleanupR360AutofillQueryParam();
+    return true;
+  }
+
   function setInputValueBySelector(selector, value) {
     const el = document.querySelector(selector);
     if (!el) return false;
@@ -1826,14 +2213,35 @@
     bindGlobalEvents();
   }
 
+  function initR360QuickPage() {
+    ensureStyle();
+    ensureR360AiButtons();
+
+    const observer = new MutationObserver(() => {
+      ensureR360AiButtons();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
   async function init() {
     if (isChatGptPage()) {
-      await autofillChatGptPromptIfNeeded();
+      const handledR360 = await autofillR360ChatGptPromptIfNeeded();
+      if (!handledR360) await autofillChatGptPromptIfNeeded();
+      return;
+    }
+
+    if (isGeminiPage()) {
+      await autofillR360GeminiPromptIfNeeded();
       return;
     }
 
     if (isRecruitingCompetitivenessPage()) {
       await autofillRecruitingCompetitivenessIfNeeded();
+      return;
+    }
+
+    if (isR360QuickPage()) {
+      initR360QuickPage();
       return;
     }
 
