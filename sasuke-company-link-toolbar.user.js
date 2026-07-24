@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sasuke Company Link Toolbar Plus
 // @namespace    http://tampermonkey.net/
-// @version      1.6.0
+// @version      1.6.1
 // @description  サスケ企業詳細ページに各種業務ツールを追加。R360 Quickへの企業名・業界連携、ChatGPT・Geminiへのプロンプト自動入力にも対応
 // @match        https://my.saaske.com/lead/cgi/*
 // @match        https://chatgpt.com/*
@@ -726,6 +726,48 @@
         height: 19px;
       }
 
+      /* Cloud Station と AI は従来どおり角丸ボタン。
+         それ以外の3アイコンは option A 方向で、
+         枠を外してイラストを許容エリア内で最大化する。 */
+      #${PERFORMANCE_ANALYSIS_BUTTON_ID},
+      #${R360_QUICK_BUTTON_ID},
+      #${JOB_MEDIA_BUTTON_ID} {
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        overflow: visible;
+      }
+
+      #${PERFORMANCE_ANALYSIS_BUTTON_ID}:hover,
+      #${R360_QUICK_BUTTON_ID}:hover,
+      #${JOB_MEDIA_BUTTON_ID}:hover {
+        background: transparent;
+        border-color: transparent;
+        box-shadow: none;
+        opacity: 0.9;
+      }
+
+      #${PERFORMANCE_ANALYSIS_BUTTON_ID}:active,
+      #${R360_QUICK_BUTTON_ID}:active,
+      #${JOB_MEDIA_BUTTON_ID}:active {
+        transform: scale(0.96);
+      }
+
+      #${PERFORMANCE_ANALYSIS_BUTTON_ID} svg,
+      #${R360_QUICK_BUTTON_ID} svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      #${JOB_MEDIA_BUTTON_ID} svg {
+        width: 19px;
+        height: 19px;
+      }
+
       .tm-sasuke-field-icon-link {
         float: right;
         display: inline-flex;
@@ -909,49 +951,53 @@
     return img;
   }
 
+
   function createPerformanceAnalysisIcon() {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
 
+    const blue = '#1457ff';
+    const darkBlue = '#0f46d8';
+
     const bar1 = document.createElementNS(svgNS, 'rect');
-    bar1.setAttribute('x', '3');
-    bar1.setAttribute('y', '15');
-    bar1.setAttribute('width', '3.2');
-    bar1.setAttribute('height', '6');
-    bar1.setAttribute('rx', '0.8');
-    bar1.setAttribute('fill', '#93c5fd');
+    bar1.setAttribute('x', '2.8');
+    bar1.setAttribute('y', '14.2');
+    bar1.setAttribute('width', '3.8');
+    bar1.setAttribute('height', '6.8');
+    bar1.setAttribute('rx', '0.7');
+    bar1.setAttribute('fill', blue);
 
     const bar2 = document.createElementNS(svgNS, 'rect');
-    bar2.setAttribute('x', '8.2');
-    bar2.setAttribute('y', '12');
-    bar2.setAttribute('width', '3.2');
-    bar2.setAttribute('height', '9');
-    bar2.setAttribute('rx', '0.8');
-    bar2.setAttribute('fill', '#60a5fa');
+    bar2.setAttribute('x', '9.0');
+    bar2.setAttribute('y', '10.7');
+    bar2.setAttribute('width', '3.8');
+    bar2.setAttribute('height', '10.3');
+    bar2.setAttribute('rx', '0.7');
+    bar2.setAttribute('fill', blue);
 
     const bar3 = document.createElementNS(svgNS, 'rect');
-    bar3.setAttribute('x', '13.4');
-    bar3.setAttribute('y', '9');
-    bar3.setAttribute('width', '3.2');
-    bar3.setAttribute('height', '12');
-    bar3.setAttribute('rx', '0.8');
-    bar3.setAttribute('fill', '#2563eb');
+    bar3.setAttribute('x', '15.2');
+    bar3.setAttribute('y', '7.1');
+    bar3.setAttribute('width', '3.8');
+    bar3.setAttribute('height', '13.9');
+    bar3.setAttribute('rx', '0.7');
+    bar3.setAttribute('fill', blue);
 
     const trend = document.createElementNS(svgNS, 'path');
-    trend.setAttribute('d', 'M3.8 11.2L8.5 6.8L12.1 9.5L20 3.6');
+    trend.setAttribute('d', 'M3.3 11.8L8.9 7.3L12.8 10.5L20 3.8');
     trend.setAttribute('fill', 'none');
-    trend.setAttribute('stroke', '#1d4ed8');
-    trend.setAttribute('stroke-width', '2');
+    trend.setAttribute('stroke', darkBlue);
+    trend.setAttribute('stroke-width', '2.5');
     trend.setAttribute('stroke-linecap', 'round');
     trend.setAttribute('stroke-linejoin', 'round');
 
     const arrow = document.createElementNS(svgNS, 'path');
-    arrow.setAttribute('d', 'M16.7 3.6H20V6.9');
+    arrow.setAttribute('d', 'M17.1 3.8H20.5V7.2');
     arrow.setAttribute('fill', 'none');
-    arrow.setAttribute('stroke', '#1d4ed8');
-    arrow.setAttribute('stroke-width', '2');
+    arrow.setAttribute('stroke', darkBlue);
+    arrow.setAttribute('stroke-width', '2.5');
     arrow.setAttribute('stroke-linecap', 'round');
     arrow.setAttribute('stroke-linejoin', 'round');
 
@@ -963,6 +1009,7 @@
     return svg;
   }
 
+
   function createR360QuickIcon() {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
@@ -970,49 +1017,33 @@
     svg.setAttribute('aria-hidden', 'true');
 
     const ring = document.createElementNS(svgNS, 'path');
-    ring.setAttribute('d', 'M18.7 7.2A8 8 0 1 0 19.8 14');
+    ring.setAttribute('d', 'M19.2 8.3A8.8 8.8 0 1 0 19.5 15.2');
     ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#1b4f8a');
-    ring.setAttribute('stroke-width', '2.1');
+    ring.setAttribute('stroke', '#1457ff');
+    ring.setAttribute('stroke-width', '2.5');
     ring.setAttribute('stroke-linecap', 'round');
 
     const arrow = document.createElementNS(svgNS, 'path');
-    arrow.setAttribute('d', 'M16.1 4.8L19.2 7.2L16.5 10');
+    arrow.setAttribute('d', 'M15.9 4.6L19.9 4.9L19.6 8.9');
     arrow.setAttribute('fill', 'none');
-    arrow.setAttribute('stroke', '#2563eb');
-    arrow.setAttribute('stroke-width', '2.1');
+    arrow.setAttribute('stroke', '#1457ff');
+    arrow.setAttribute('stroke-width', '2.5');
     arrow.setAttribute('stroke-linecap', 'round');
     arrow.setAttribute('stroke-linejoin', 'round');
 
-    const bar1 = document.createElementNS(svgNS, 'rect');
-    bar1.setAttribute('x', '6.4');
-    bar1.setAttribute('y', '13.8');
-    bar1.setAttribute('width', '2.4');
-    bar1.setAttribute('height', '4.1');
-    bar1.setAttribute('rx', '0.6');
-    bar1.setAttribute('fill', '#93c5fd');
-
-    const bar2 = document.createElementNS(svgNS, 'rect');
-    bar2.setAttribute('x', '10.4');
-    bar2.setAttribute('y', '10.8');
-    bar2.setAttribute('width', '2.4');
-    bar2.setAttribute('height', '7.1');
-    bar2.setAttribute('rx', '0.6');
-    bar2.setAttribute('fill', '#60a5fa');
-
-    const bar3 = document.createElementNS(svgNS, 'rect');
-    bar3.setAttribute('x', '14.4');
-    bar3.setAttribute('y', '8.2');
-    bar3.setAttribute('width', '2.4');
-    bar3.setAttribute('height', '9.7');
-    bar3.setAttribute('rx', '0.6');
-    bar3.setAttribute('fill', '#7c3aed');
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('x', '12');
+    label.setAttribute('y', '14.2');
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('font-size', '7.4');
+    label.setAttribute('font-weight', '700');
+    label.setAttribute('font-family', 'Arial, Helvetica, sans-serif');
+    label.setAttribute('fill', '#1457ff');
+    label.textContent = '360';
 
     svg.appendChild(ring);
     svg.appendChild(arrow);
-    svg.appendChild(bar1);
-    svg.appendChild(bar2);
-    svg.appendChild(bar3);
+    svg.appendChild(label);
     return svg;
   }
 
@@ -1046,33 +1077,34 @@
     return svg;
   }
 
+
   function createIndeedLikeIcon() {
     const svgNS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('viewBox', '0 0 64 64');
+    svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
 
     const blue = '#0a3ea8';
 
     const arc = document.createElementNS(svgNS, 'path');
-    arc.setAttribute('d', 'M10 30 C14 14, 25 8, 39 8 C48 8, 55 11, 60 17');
+    arc.setAttribute('d', 'M4 12C5 7.4 8.6 4.4 13 4.4C15.8 4.4 18.2 5.3 19.9 7.1');
     arc.setAttribute('fill', 'none');
     arc.setAttribute('stroke', blue);
-    arc.setAttribute('stroke-width', '5');
+    arc.setAttribute('stroke-width', '2.4');
     arc.setAttribute('stroke-linecap', 'round');
 
     const dot = document.createElementNS(svgNS, 'circle');
-    dot.setAttribute('cx', '33');
-    dot.setAttribute('cy', '24');
-    dot.setAttribute('r', '7');
+    dot.setAttribute('cx', '12');
+    dot.setAttribute('cy', '10');
+    dot.setAttribute('r', '2.25');
     dot.setAttribute('fill', blue);
 
     const stem = document.createElementNS(svgNS, 'rect');
-    stem.setAttribute('x', '28.5');
-    stem.setAttribute('y', '33');
-    stem.setAttribute('width', '9');
-    stem.setAttribute('height', '20');
-    stem.setAttribute('rx', '4.5');
+    stem.setAttribute('x', '10.35');
+    stem.setAttribute('y', '13.1');
+    stem.setAttribute('width', '3.3');
+    stem.setAttribute('height', '6.9');
+    stem.setAttribute('rx', '1.65');
     stem.setAttribute('fill', blue);
 
     svg.appendChild(arc);
@@ -1515,9 +1547,9 @@
     }
 
     // メニューの対象は3媒体だが、入口は従来どおり認識しやすいIndeed風アイコンとする。
-    if (button.dataset.iconVersion !== 'indeed-like-v1') {
+    if (button.dataset.iconVersion !== 'indeed-like-v2') {
       button.replaceChildren(createIndeedLikeIcon());
-      button.dataset.iconVersion = 'indeed-like-v1';
+      button.dataset.iconVersion = 'indeed-like-v2';
     }
 
     return button;
