@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sasuke Company Link Toolbar Plus
 // @namespace    http://tampermonkey.net/
-// @version      1.6.2
-// @description  サスケ企業詳細ページにCloud Station、運用実績分析、AI調査、テレアポガイド、求人媒体検索を追加
+// @version      1.6.3
+// @description  サスケ企業詳細ページにCloud Station、運用実績分析、求人市場レポート検索、AI調査、テレアポガイド、求人媒体検索を追加
 // @match        https://my.saaske.com/lead/cgi/*
 // @match        https://chatgpt.com/*
 // @match        https://tsicb.github.io/recruiting-competitiveness/*
@@ -29,6 +29,8 @@
   const TOOLBAR_ID = 'tm-sasuke-link-toolbar';
   const CLOUD_LINK_ID = 'tm-sasuke-cloud-link';
   const PERFORMANCE_ANALYSIS_BUTTON_ID = 'tm-sasuke-performance-analysis-button';
+  const MARKET_REPORT_LINK_ID = 'tm-sasuke-market-report-link';
+  const ANALYSIS_TOOLS_DIVIDER_ID = 'tm-sasuke-analysis-tools-divider';
   const INDEED_LINK_ID = 'tm-sasuke-indeed-link';
   const JOB_MEDIA_BUTTON_ID = 'tm-sasuke-job-media-button';
   const JOB_MEDIA_MENU_ID = 'tm-sasuke-job-media-menu';
@@ -46,6 +48,7 @@
   const TEL_APP_GUIDE_URL = 'https://tsicb.github.io/tel-app-guide/';
   const RECRUITING_COMPETITIVENESS_URL = 'https://tsicb.github.io/recruiting-competitiveness/';
   const PERFORMANCE_ANALYSIS_URL = 'https://tsicb.github.io/ti-idd-perf/';
+  const MARKET_REPORT_SEARCH_URL = 'https://tsicb.github.io/pdf-text-jump/';
   const PERFORMANCE_DATA_FOLDER_PATH = 'K:\\天市事業\\public\\1049\\共有情報\\tenichiプラス\\indeedマージレポート\\output_dataset';
 
   // 添付いただいた Cloud Station 32px アイコンを埋め込み。外部画像ファイル不要で動きます。
@@ -694,10 +697,11 @@
         height: 19px;
       }
 
-      /* Cloud Station と AI は従来どおり角丸ボタン。
-         運用実績分析と求人媒体検索は option A 方向で、
+      /* Cloud Station と AI は従来どおり。
+         運用実績分析・市場レポート検索・求人媒体検索は、
          枠を外してイラストを許容エリア内で最大化する。 */
       #${PERFORMANCE_ANALYSIS_BUTTON_ID},
+      #${MARKET_REPORT_LINK_ID},
       #${JOB_MEDIA_BUTTON_ID} {
         border: none;
         border-radius: 0;
@@ -710,6 +714,7 @@
       }
 
       #${PERFORMANCE_ANALYSIS_BUTTON_ID}:hover,
+      #${MARKET_REPORT_LINK_ID}:hover,
       #${JOB_MEDIA_BUTTON_ID}:hover {
         background: transparent;
         border-color: transparent;
@@ -718,11 +723,13 @@
       }
 
       #${PERFORMANCE_ANALYSIS_BUTTON_ID}:active,
+      #${MARKET_REPORT_LINK_ID}:active,
       #${JOB_MEDIA_BUTTON_ID}:active {
         transform: scale(0.96);
       }
 
-      #${PERFORMANCE_ANALYSIS_BUTTON_ID} svg {
+      #${PERFORMANCE_ANALYSIS_BUTTON_ID} svg,
+      #${MARKET_REPORT_LINK_ID} svg {
         width: 20px;
         height: 20px;
       }
@@ -730,6 +737,17 @@
       #${JOB_MEDIA_BUTTON_ID} svg {
         width: 19px;
         height: 19px;
+      }
+
+      #${ANALYSIS_TOOLS_DIVIDER_ID} {
+        display: inline-block;
+        width: 1px;
+        height: 16px;
+        margin: 0 1px;
+        background: #d4dde7;
+        border-radius: 1px;
+        flex: 0 0 auto;
+        pointer-events: none;
       }
 
       .tm-sasuke-field-icon-link {
@@ -970,6 +988,67 @@
     svg.appendChild(bar3);
     svg.appendChild(trend);
     svg.appendChild(arrow);
+    return svg;
+  }
+
+
+  function createMarketReportSearchIcon() {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const blue = '#1769aa';
+    const lightBlue = '#60a5fa';
+
+    const page = document.createElementNS(svgNS, 'path');
+    page.setAttribute('d', 'M4.2 2.8H13.6L18.1 7.3V13.2H15.8V8.4H12.6V5.1H6.5V18.9H11.5V21.2H4.2Z');
+    page.setAttribute('fill', blue);
+    page.setAttribute('fill-rule', 'evenodd');
+
+    const fold = document.createElementNS(svgNS, 'path');
+    fold.setAttribute('d', 'M13.8 3.5V7.1H17.4');
+    fold.setAttribute('fill', 'none');
+    fold.setAttribute('stroke', lightBlue);
+    fold.setAttribute('stroke-width', '1.5');
+    fold.setAttribute('stroke-linecap', 'round');
+    fold.setAttribute('stroke-linejoin', 'round');
+
+    const line1 = document.createElementNS(svgNS, 'path');
+    line1.setAttribute('d', 'M8.2 10H13.5');
+    line1.setAttribute('fill', 'none');
+    line1.setAttribute('stroke', lightBlue);
+    line1.setAttribute('stroke-width', '1.5');
+    line1.setAttribute('stroke-linecap', 'round');
+
+    const line2 = document.createElementNS(svgNS, 'path');
+    line2.setAttribute('d', 'M8.2 13H11.8');
+    line2.setAttribute('fill', 'none');
+    line2.setAttribute('stroke', lightBlue);
+    line2.setAttribute('stroke-width', '1.5');
+    line2.setAttribute('stroke-linecap', 'round');
+
+    const lens = document.createElementNS(svgNS, 'circle');
+    lens.setAttribute('cx', '15.2');
+    lens.setAttribute('cy', '16.1');
+    lens.setAttribute('r', '3.4');
+    lens.setAttribute('fill', '#ffffff');
+    lens.setAttribute('stroke', blue);
+    lens.setAttribute('stroke-width', '2');
+
+    const handle = document.createElementNS(svgNS, 'path');
+    handle.setAttribute('d', 'M17.8 18.7L21 21.9');
+    handle.setAttribute('fill', 'none');
+    handle.setAttribute('stroke', blue);
+    handle.setAttribute('stroke-width', '2.2');
+    handle.setAttribute('stroke-linecap', 'round');
+
+    svg.appendChild(page);
+    svg.appendChild(fold);
+    svg.appendChild(line1);
+    svg.appendChild(line2);
+    svg.appendChild(lens);
+    svg.appendChild(handle);
     return svg;
   }
 
@@ -1364,6 +1443,35 @@
     return button;
   }
 
+  function ensureMarketReportButton(toolbar) {
+    let link = document.getElementById(MARKET_REPORT_LINK_ID);
+    if (!link) {
+      link = document.createElement('a');
+      link.id = MARKET_REPORT_LINK_ID;
+      link.className = 'tm-sasuke-link-btn';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.href = MARKET_REPORT_SEARCH_URL;
+      link.title = '求人市場レポートを横断検索';
+      link.setAttribute('aria-label', link.title);
+      link.appendChild(createMarketReportSearchIcon());
+      toolbar.appendChild(link);
+    }
+    return link;
+  }
+
+  function ensureAnalysisToolsDivider(toolbar) {
+    let divider = document.getElementById(ANALYSIS_TOOLS_DIVIDER_ID);
+    if (!divider) {
+      divider = document.createElement('span');
+      divider.id = ANALYSIS_TOOLS_DIVIDER_ID;
+      divider.setAttribute('aria-hidden', 'true');
+      toolbar.appendChild(divider);
+    }
+    return divider;
+  }
+
+
   function ensureTelGuideButtonInPhoneLabel() {
     const phoneEl = document.querySelector(PHONE_SELECTOR);
     const phoneRow = phoneEl ? phoneEl.closest('tr') : null;
@@ -1612,6 +1720,8 @@
 
     ensureCloudStationButton(toolbar);
     ensurePerformanceAnalysisButton(toolbar);
+    ensureMarketReportButton(toolbar);
+    ensureAnalysisToolsDivider(toolbar);
     ensureGptButton(toolbar);
     ensureGptMenu(toolbar);
     ensureJobMediaButton(toolbar);
