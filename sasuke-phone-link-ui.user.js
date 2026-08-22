@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Saasuke Phone Link UI
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.0
-// @description  サスケ内の電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。クリック時だけ非公開 PhoneBridge Core へ発信要求を渡します。編集時のHTML混入防止にも対応。
+// @version      1.1.1
+// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まりで誤検出を抑制し、クリック時だけ非公開 PhoneBridge Core へ発信要求を渡します。
 // @match        https://my.saaske.com/lead/cgi/*
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
@@ -56,6 +56,30 @@
 
   function normalizeText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+
+  // PHONE_REGEXは表記ゆれを広めに拾う候補抽出用。
+  // 実際にリンク化する前に、国内電話番号として最低限安全な2条件だけで絞る。
+  // 1) 区切り文字を除いた数字が10桁または11桁
+  // 2) 0の次が1〜9（00... を除外）
+  // 国際表記は現時点では対象外。
+  function isLikelyDomesticPhoneCandidate(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (digits.length !== 10 && digits.length !== 11) return false;
+    return /^0[1-9]/.test(digits);
+  }
+
+  function hasLikelyPhoneCandidate(value) {
+    const text = String(value || '');
+    if (!text) return false;
+
+    const regex = new RegExp(PHONE_REGEX.source, PHONE_REGEX.flags);
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      if (isLikelyDomesticPhoneCandidate(match[0])) return true;
+    }
+    return false;
   }
 
   function ensureStyle() {
@@ -360,6 +384,7 @@
     let match;
 
     while ((match = regex.exec(text)) !== null) {
+      if (!isLikelyDomesticPhoneCandidate(match[0])) continue;
       const phone = normalizeText(match[0]);
       if (phone && !phones.includes(phone)) phones.push(phone);
     }
@@ -675,8 +700,9 @@
           if (parent.closest(`.${PHONE_LINK_CLASS}`)) return NodeFilter.FILTER_REJECT;
           if (parent.closest('a, button, input, textarea, script, style')) return NodeFilter.FILTER_REJECT;
 
-          const testRegex = new RegExp(PHONE_REGEX.source, PHONE_REGEX.flags);
-          return testRegex.test(value) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          return hasLikelyPhoneCandidate(value)
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
         }
       }
     );
@@ -699,7 +725,7 @@
     if (callLog && callLog.dataset.tmPhoneLinkEditingPrep === '1') return;
 
     const originalText = normalizeText(message.textContent || '');
-    const hasPhone = new RegExp(PHONE_REGEX.source, PHONE_REGEX.flags).test(originalText);
+    const hasPhone = hasLikelyPhoneCandidate(originalText);
     const hasUrl = /https?:\/\//iu.test(originalText);
     if (!hasPhone && !hasUrl) return;
 
@@ -814,8 +840,10 @@
     const frag = document.createDocumentFragment();
 
     while ((match = regex.exec(text)) !== null) {
-      found = true;
       const matchedPhone = match[0];
+      if (!isLikelyDomesticPhoneCandidate(matchedPhone)) continue;
+
+      found = true;
       const start = match.index;
       const end = start + matchedPhone.length;
 
@@ -854,8 +882,9 @@
           if (parent.closest(`.${PHONE_LINK_CLASS}`)) return NodeFilter.FILTER_REJECT;
           if (parent.closest('a, button, input, textarea, script, style')) return NodeFilter.FILTER_REJECT;
 
-          const testRegex = new RegExp(PHONE_REGEX.source, PHONE_REGEX.flags);
-          return testRegex.test(value) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          return hasLikelyPhoneCandidate(value)
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
         }
       }
     );
