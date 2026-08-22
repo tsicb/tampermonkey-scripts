@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Saasuke Phone Link UI
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.3
-// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まり・数字列境界で誤検出を抑制し、非公開 PhoneBridge Core へ発信要求を渡します。
+// @version      1.1.4
+// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。Webリンクの新規タブ遷移と対応履歴修正時の編集競合を安定化し、非公開 PhoneBridge Core へ発信要求を渡します。
 // @match        https://my.saaske.com/lead/cgi/*
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
@@ -35,6 +35,8 @@
   const EDIT_CLEANUP_DELAY_MS = 60;
   const DRAG_THRESHOLD_PX = 4;
   const CORE_ACK_TIMEOUT_MS = 1200;
+  const CALL_LOG_EDIT_RECOVERY_MS = 5000;
+  const CALL_LOG_EXIT_RECOVERY_MS = 1500;
 
   let renderTimer = null;
   let editCleanupTimer = null;
@@ -574,6 +576,18 @@
     anchor.rel = 'noopener noreferrer';
     anchor.textContent = label;
     anchor.title = `新しいタブで開く: ${url}`;
+
+    // 対応履歴エリアにはサスケ本体のAjaxリンク処理があるため、
+    // ブラウザ標準のtarget=_blank任せにせず、このリンクだけはUI側で明示的に開く。
+    // capture段階でサスケ側の委譲clickハンドラへ伝播させないことで、
+    // hrefが一瞬表示されるだけで遷移しない競合を避ける。
+    anchor.addEventListener('click', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }, true);
+
     return anchor;
   }
 
@@ -810,23 +824,67 @@
     return !!text && /(登録|保存|更新|確定|save|submit|update|取消|キャンセル|cancel)/iu.test(text);
   }
 
+  function callLogHasEditUi(callLog) {
+    if (!callLog || !callLog.querySelector) return false;
+
+    if (callLog.querySelector('textarea, select, [contenteditable="true"]')) {
+      return true;
+    }
+
+    const inputs = Array.from(callLog.querySelectorAll('input:not([type="hidden"])'));
+    if (inputs.some((el) => !['button', 'submit', 'reset'].includes(String(el.type || '').toLowerCase()))) {
+      return true;
+    }
+
+    const controls = Array.from(
+      callLog.querySelectorAll('button, input[type="button"], input[type="submit"]')
+    );
+    return controls.some((el) => /(登録|保存|更新|確定|取消|キャンセル|cancel|save|submit|update)/iu.test(getActionText(el)));
+  }
+
+  function releaseCallLogEditingPrep(callLog) {
+    if (!callLog || !callLog.isConnected) return;
+    delete callLog.dataset.tmPhoneLinkEditingPrep;
+    delete callLog.dataset.tmPhoneLinkEditingStartedAt;
+    scheduleRender();
+  }
+
+  function scheduleCallLogEditRecovery(callLog) {
+    setTimeout(() => {
+      if (!callLog || !callLog.isConnected) return;
+
+      // 編集フォームが実際に出ている間は、閲覧用リンクへ戻さない。
+      if (callLogHasEditUi(callLog)) return;
+
+      // Ajaxが失敗した／編集画面へ切り替わらなかった場合だけ閲覧表示へ復帰する。
+      releaseCallLogEditingPrep(callLog);
+    }, CALL_LOG_EDIT_RECOVERY_MS);
+  }
+
+  function scheduleCallLogExitRecovery(callLog) {
+    setTimeout(() => {
+      if (!callLog || !callLog.isConnected) return;
+      if (callLogHasEditUi(callLog)) return;
+      releaseCallLogEditingPrep(callLog);
+    }, CALL_LOG_EXIT_RECOVERY_MS);
+  }
+
   function prepareForPossibleEdit(target) {
     if (!isTargetPage() || !isEditTrigger(target)) return;
 
     const callLog = getCallLogScope(target);
     if (callLog) {
-      // 対応履歴の閲覧用リンクは、サスケ本体が編集フォームを生成する前に元HTMLへ戻す。
+      // 対応履歴ではmousedown時にDOMを書き換えない。
+      // 実際のclick直前（capture）だけ元HTMLへ戻し、そのままサスケ本体の
+      // 「修正」clickハンドラへイベントを通す。これによりAjax編集処理との競合を避ける。
       callLog.dataset.tmPhoneLinkEditingPrep = '1';
+      callLog.dataset.tmPhoneLinkEditingStartedAt = String(Date.now());
       restoreCallLogOriginal(callLog);
       unwrapPhoneLinks(callLog);
       cleanEditFields(callLog);
       setTimeout(() => cleanEditFields(callLog), 0);
       setTimeout(() => cleanEditFields(callLog), 120);
-      setTimeout(() => {
-        if (!callLog.isConnected) return;
-        delete callLog.dataset.tmPhoneLinkEditingPrep;
-        scheduleRender();
-      }, 700);
+      scheduleCallLogEditRecovery(callLog);
       return;
     }
 
@@ -845,11 +903,19 @@
     const callLog = getCallLogScope(target);
     const row = target.closest && target.closest('tr');
     cleanEditFields(callLog || row || document);
+
+    if (callLog) {
+      // 保存／キャンセル後に同じcallLog DOMが再利用されるケースでは、
+      // 編集UIが消えたことを確認してから閲覧用リンクを再生成する。
+      callLog.dataset.tmPhoneLinkEditingPrep = '1';
+      scheduleCallLogExitRecovery(callLog);
+    }
   }
 
   function bindEditSafetyEvents() {
+    // 保存／キャンセルは従来どおりmousedownでも編集欄の安全化を行う。
+    // 「修正」の元HTML復元はclick時だけに限定し、サスケ側のmousedown処理を邪魔しない。
     document.addEventListener('mousedown', (event) => {
-      prepareForPossibleEdit(event.target);
       prepareBeforeSaveOrCancel(event.target);
     }, true);
 
