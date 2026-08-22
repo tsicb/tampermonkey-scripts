@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Saasuke Phone Link UI
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.1
-// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まりで誤検出を抑制し、クリック時だけ非公開 PhoneBridge Core へ発信要求を渡します。
+// @version      1.1.2
+// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まりで誤検出を抑制し、改行区切りの電話番号も正しく検出して非公開 PhoneBridge Core へ発信要求を渡します。
 // @match        https://my.saaske.com/lead/cgi/*
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
@@ -684,6 +684,34 @@
     return true;
   }
 
+  // 対応履歴の <br> は textContent では区切りにならず、複数行の数字が連結される。
+  // そのため対応履歴の事前判定も、実際のリンク化と同じくテキストノード単位で行う。
+  function containerHasLikelyPhoneCandidate(container) {
+    if (!container) return false;
+
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const value = node.nodeValue || '';
+          if (!value.trim()) return NodeFilter.FILTER_REJECT;
+
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (parent.closest(`.${PHONE_LINK_CLASS}`)) return NodeFilter.FILTER_REJECT;
+          if (parent.closest('a, button, input, textarea, script, style')) return NodeFilter.FILTER_REJECT;
+
+          return hasLikelyPhoneCandidate(value)
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
+        }
+      }
+    );
+
+    return !!walker.nextNode();
+  }
+
   function enhancePhonesInContainer(container, sourceLabel, sourceText) {
     if (!container) return false;
 
@@ -725,7 +753,7 @@
     if (callLog && callLog.dataset.tmPhoneLinkEditingPrep === '1') return;
 
     const originalText = normalizeText(message.textContent || '');
-    const hasPhone = hasLikelyPhoneCandidate(originalText);
+    const hasPhone = containerHasLikelyPhoneCandidate(message);
     const hasUrl = /https?:\/\//iu.test(originalText);
     if (!hasPhone && !hasUrl) return;
 
