@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Saasuke Phone Link UI
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.2
-// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まりで誤検出を抑制し、改行区切りの電話番号も正しく検出して非公開 PhoneBridge Core へ発信要求を渡します。
+// @version      1.1.3
+// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。10/11桁・0[1-9]始まり・数字列境界で誤検出を抑制し、非公開 PhoneBridge Core へ発信要求を渡します。
 // @match        https://my.saaske.com/lead/cgi/*
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
@@ -70,6 +70,23 @@
     return /^0[1-9]/.test(digits);
   }
 
+  // 長い連続数字（ID・管理番号など）の途中に、たまたま10/11桁の
+  // 0始まり部分があっても電話番号として切り出さない。
+  // 候補の直前・直後が数字なら「より長い数字列の一部」とみなして除外する。
+  function hasPhoneDigitBoundary(text, start, end) {
+    const source = String(text || '');
+    const before = start > 0 ? source[start - 1] : '';
+    const after = end < source.length ? source[end] : '';
+    return !/\d/.test(before) && !/\d/.test(after);
+  }
+
+  function isAcceptedPhoneMatch(text, match) {
+    if (!match || !isLikelyDomesticPhoneCandidate(match[0])) return false;
+    const start = match.index;
+    const end = start + match[0].length;
+    return hasPhoneDigitBoundary(text, start, end);
+  }
+
   function hasLikelyPhoneCandidate(value) {
     const text = String(value || '');
     if (!text) return false;
@@ -77,7 +94,7 @@
     const regex = new RegExp(PHONE_REGEX.source, PHONE_REGEX.flags);
     let match;
     while ((match = regex.exec(text)) !== null) {
-      if (isLikelyDomesticPhoneCandidate(match[0])) return true;
+      if (isAcceptedPhoneMatch(text, match)) return true;
     }
     return false;
   }
@@ -384,7 +401,7 @@
     let match;
 
     while ((match = regex.exec(text)) !== null) {
-      if (!isLikelyDomesticPhoneCandidate(match[0])) continue;
+      if (!isAcceptedPhoneMatch(text, match)) continue;
       const phone = normalizeText(match[0]);
       if (phone && !phones.includes(phone)) phones.push(phone);
     }
@@ -869,7 +886,7 @@
 
     while ((match = regex.exec(text)) !== null) {
       const matchedPhone = match[0];
-      if (!isLikelyDomesticPhoneCandidate(matchedPhone)) continue;
+      if (!isAcceptedPhoneMatch(text, match)) continue;
 
       found = true;
       const start = match.index;
