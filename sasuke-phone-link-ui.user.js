@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Saasuke Phone Link UI
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.4
-// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、対応履歴の電話番号・Web URLも見やすくリンク化。Webリンクの新規タブ遷移と対応履歴修正時の編集競合を安定化し、非公開 PhoneBridge Core へ発信要求を渡します。
+// @version      1.1.5
+// @description  サスケ内の国内電話番号を選択可能なリンク表示にし、通常項目・対応履歴・リードソースのアコーディオン内「電話番号」をリンク化。対応履歴のWeb URLも見やすくリンク化し、非公開 PhoneBridge Core へ発信要求を渡します。
 // @match        https://my.saaske.com/lead/cgi/*
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/sasuke-phone-link-ui.user.js
@@ -26,6 +26,8 @@
   const TABLE_SELECTOR = '#tbl-dt_label1';
   const CALL_RECORD_SELECTOR = '#call_record';
   const CALL_MESSAGE_SELECTOR = '#call_record .call_list.log_call .cl_msg';
+  const ACCORDION_SELECTOR = '#accordion';
+  const ACCORDION_RECORD_SELECTOR = '#accordion .record_box';
   const PHONE_LINK_CLASS = 'tm-sasuke-phone-send';
   const WEB_LINK_CLASS = 'tm-sasuke-history-web-link';
   const STYLE_ID = 'tm-sasuke-phone-link-ui-style';
@@ -37,6 +39,8 @@
   const CORE_ACK_TIMEOUT_MS = 1200;
   const CALL_LOG_EDIT_RECOVERY_MS = 5000;
   const CALL_LOG_EXIT_RECOVERY_MS = 1500;
+  const ACCORDION_EDIT_RECOVERY_MS = 5000;
+  const ACCORDION_EXIT_RECOVERY_MS = 1500;
 
   let renderTimer = null;
   let editCleanupTimer = null;
@@ -793,6 +797,104 @@
     enhancePhonesInContainer(message, '対応履歴', originalText);
   }
 
+  function getAccordionRecordTitle(recordBox) {
+    if (!recordBox) return '';
+
+    const previous = recordBox.previousElementSibling;
+    if (previous && previous.tagName === 'H3') {
+      return normalizeText(previous.textContent || '');
+    }
+
+    const id = String(recordBox.id || '');
+    const match = id.match(/^record(.+)_div$/);
+    if (match) {
+      const heading = document.getElementById(`record${match[1]}_h3`);
+      if (heading) return normalizeText(heading.textContent || '');
+    }
+
+    return '';
+  }
+
+  function getAccordionPhoneValueElement(li) {
+    if (!li) return null;
+
+    const label = Array.from(li.children || []).find(
+      (el) => el.tagName === 'B'
+    );
+    if (!label || normalizeText(label.textContent || '') !== '電話番号') return null;
+
+    const directSpan = Array.from(li.children || []).find(
+      (el) => el.tagName === 'SPAN'
+    );
+    return directSpan || li.querySelector('span');
+  }
+
+  function enhanceAccordionRecordPhones(recordBox) {
+    if (!recordBox || recordBox.dataset.tmPhoneLinkEditingPrep === '1') return;
+
+    const recordTitle = getAccordionRecordTitle(recordBox);
+
+    recordBox.querySelectorAll('li').forEach((li) => {
+      const value = getAccordionPhoneValueElement(li);
+      if (!value) return;
+
+      const sourceText = normalizeText(value.textContent || '');
+      if (!containerHasLikelyPhoneCandidate(value)) return;
+
+      const sourceLabel = recordTitle
+        ? `リードソース / ${recordTitle} / 電話番号`
+        : 'リードソース / 電話番号';
+
+      enhancePhonesInContainer(value, sourceLabel, sourceText);
+    });
+  }
+
+  function getAccordionRecordScope(target) {
+    if (!target || !target.closest) return null;
+    return target.closest(`${ACCORDION_SELECTOR} .record_box`);
+  }
+
+  function accordionRecordHasEditUi(recordBox) {
+    if (!recordBox || !recordBox.querySelector) return false;
+
+    if (recordBox.querySelector('textarea, select, [contenteditable="true"]')) {
+      return true;
+    }
+
+    const inputs = Array.from(recordBox.querySelectorAll('input:not([type="hidden"])'));
+    if (inputs.some((el) => !['button', 'submit', 'reset'].includes(String(el.type || '').toLowerCase()))) {
+      return true;
+    }
+
+    const controls = Array.from(
+      recordBox.querySelectorAll('button, input[type="button"], input[type="submit"]')
+    );
+    return controls.some((el) => /(登録|保存|更新|確定|取消|キャンセル|cancel|save|submit|update)/iu.test(getActionText(el)));
+  }
+
+  function releaseAccordionEditingPrep(recordBox) {
+    if (!recordBox || !recordBox.isConnected) return;
+    delete recordBox.dataset.tmPhoneLinkEditingPrep;
+    delete recordBox.dataset.tmPhoneLinkEditingStartedAt;
+    scheduleRender();
+  }
+
+  function scheduleAccordionEditRecovery(recordBox) {
+    setTimeout(() => {
+      if (!recordBox || !recordBox.isConnected) return;
+      if (accordionRecordHasEditUi(recordBox)) return;
+      releaseAccordionEditingPrep(recordBox);
+    }, ACCORDION_EDIT_RECOVERY_MS);
+  }
+
+  function scheduleAccordionExitRecovery(recordBox) {
+    setTimeout(() => {
+      if (!recordBox || !recordBox.isConnected) return;
+      if (accordionRecordHasEditUi(recordBox)) return;
+      releaseAccordionEditingPrep(recordBox);
+    }, ACCORDION_EXIT_RECOVERY_MS);
+  }
+
   function getActionText(el) {
     if (!el) return '';
     const parts = [
@@ -888,6 +990,20 @@
       return;
     }
 
+    const accordionRecord = getAccordionRecordScope(target);
+    if (accordionRecord) {
+      // リードソースのアコーディオンも、修正クリック直前だけ表示用リンクを解除する。
+      // サスケ側のAjax編集処理にはそのままイベントを渡す。
+      accordionRecord.dataset.tmPhoneLinkEditingPrep = '1';
+      accordionRecord.dataset.tmPhoneLinkEditingStartedAt = String(Date.now());
+      unwrapPhoneLinks(accordionRecord);
+      cleanEditFields(accordionRecord);
+      setTimeout(() => cleanEditFields(accordionRecord), 0);
+      setTimeout(() => cleanEditFields(accordionRecord), 120);
+      scheduleAccordionEditRecovery(accordionRecord);
+      return;
+    }
+
     const row = target.closest && target.closest('tr');
     const scope = row || document.querySelector(TABLE_SELECTOR) || document;
 
@@ -901,14 +1017,20 @@
   function prepareBeforeSaveOrCancel(target) {
     if (!isTargetPage() || !isSaveOrCancelTrigger(target)) return;
     const callLog = getCallLogScope(target);
+    const accordionRecord = getAccordionRecordScope(target);
     const row = target.closest && target.closest('tr');
-    cleanEditFields(callLog || row || document);
+    cleanEditFields(callLog || accordionRecord || row || document);
 
     if (callLog) {
       // 保存／キャンセル後に同じcallLog DOMが再利用されるケースでは、
       // 編集UIが消えたことを確認してから閲覧用リンクを再生成する。
       callLog.dataset.tmPhoneLinkEditingPrep = '1';
       scheduleCallLogExitRecovery(callLog);
+    }
+
+    if (accordionRecord) {
+      accordionRecord.dataset.tmPhoneLinkEditingPrep = '1';
+      scheduleAccordionExitRecovery(accordionRecord);
     }
   }
 
@@ -1014,6 +1136,10 @@
 
     // 対応履歴本文も対象にする。URL整形 → 電話番号リンク化の順で処理する。
     document.querySelectorAll(CALL_MESSAGE_SELECTOR).forEach(enhanceCallRecordMessage);
+
+    // リードソースのアコーディオンは「電話番号」ラベルの値だけを対象にする。
+    // 日付・金額・PV数・備考など、他の数値項目は探索しない。
+    document.querySelectorAll(ACCORDION_RECORD_SELECTOR).forEach(enhanceAccordionRecordPhones);
   }
 
   function scheduleRender() {
