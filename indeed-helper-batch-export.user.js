@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.0.1
 // @description  現行Indeedの検索結果・求人詳細・Indeed解釈・ユーザー文脈を単発/一括でTSV出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -22,7 +22,7 @@
   const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v2';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v1';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v2';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -146,7 +146,9 @@
     '待遇福利厚生',
     '社会保険',
     '職場環境',
+    '応募方法',
     '選考プロセス',
+    'その他',
     '企業名詳細',
     '本社所在地',
     '業種',
@@ -606,6 +608,53 @@
     return canonicalViewJobUrl(jobKey || getJobKeyFromUrl(location.href), location.href) || normalizeUrl(location.href);
   }
 
+  function sanitizeAcquisitionUrl(rawUrl) {
+    const norm = normalizeUrl(rawUrl);
+    if (!norm) return '';
+    const jk = getJobKeyFromUrl(norm);
+    if (jk) return canonicalViewJobUrl(jk, norm) || norm;
+    try {
+      const u = new URL(norm);
+      return `${u.origin}${u.pathname}`;
+    } catch (e) {
+      return norm;
+    }
+  }
+
+  function sanitizeRequestPath(rawPath, fallbackJobKey = '') {
+    const raw = String(rawPath || '').trim();
+    const jk = getJobKeyFromUrl(raw) || fallbackJobKey || '';
+    if (jk) {
+      let includeJson = false;
+      try {
+        const u = new URL(raw || `/viewjob?jk=${encodeURIComponent(jk)}`, location.origin);
+        includeJson = u.searchParams.get('json') === '1';
+      } catch (e) {}
+      return `/viewjob?jk=${encodeURIComponent(jk)}${includeJson ? '&json=1' : ''}`;
+    }
+    if (!raw) return '';
+    try {
+      const u = new URL(raw, location.origin);
+      return u.pathname || '';
+    } catch (e) {
+      return raw.split('?')[0] || '';
+    }
+  }
+
+  function sanitizeIndeedContentUrl(rawUrl) {
+    const norm = normalizeUrl(rawUrl);
+    if (!norm) return '';
+    try {
+      const u = new URL(norm);
+      if (u.hostname === 'jp.indeed.com' || u.hostname.endsWith('.indeed.com')) {
+        return `${u.origin}${u.pathname}`;
+      }
+      return norm;
+    } catch (e) {
+      return norm;
+    }
+  }
+
   function getUrlLike(value) {
     if (!value) return '';
     if (typeof value === 'string') return value;
@@ -642,7 +691,7 @@
     const knownLabels = new Set([
       'job-description','qualification','work-hours','working-system','holidays','full-address','work-location',
       'commute-info','pay','salary-example','probation-conditions','benefits','social-insurance','work-environment',
-      'apply-info','company-name','company-location','company-industry','company-president','contact-tel'
+      'apply-method','apply-info','other','company-name','company-location','company-industry','company-president','contact-tel'
     ]);
     const labels = [];
     const unknown = [];
@@ -754,7 +803,7 @@
 
     record['詳細取得日時'] = nowText();
     record['取得プロファイル'] = getProfileLabel();
-    record['取得URL'] = location.href;
+    record['取得URL'] = sanitizeAcquisitionUrl(location.href);
     record['ページタイトル'] = document.title || '';
     record['_initialData有無'] = boolText(getCandidateRoots().length > 0);
     record['JSON-LD JobPosting有無'] = boolText(Boolean(ld));
@@ -796,7 +845,7 @@
     record['ログイン状態'] = boolText(body.loggedIn ?? root.loggedIn ?? body.saveJobButtonContainerModel?.isLoggedIn);
     record['canonical URL'] = getCanonicalUrl(bundle.jobKey);
     record['詳細ページスポンサー判定'] = boolText(body.sponsored ?? root.sponsored);
-    record['requestPath'] = body.requestPath || root.requestPath || '';
+    record['requestPath'] = sanitizeRequestPath(body.requestPath || root.requestPath || '', bundle.jobKey);
     record['求人キー'] = bundle.jobKey || '';
     record['求人タイトル'] = bundle.jobTitle || '';
     record['Indeed標準職種名'] = header.jobNormTitle || '';
@@ -811,8 +860,8 @@
     record['会社名'] = header.companyName || semanticCompanyName || '';
     record['求人本文内企業名'] = semanticCompanyName;
     record['親会社名'] = header.parentCompanyName || '';
-    record['会社ページURL'] = header.companyOverviewLink || '';
-    record['会社口コミURL'] = header.companyReviewLink || header.companyReviewModel?.desktopCompanyLink || header.companyReviewModel?.mobileCompanyLink || '';
+    record['会社ページURL'] = sanitizeIndeedContentUrl(header.companyOverviewLink || '');
+    record['会社口コミURL'] = sanitizeIndeedContentUrl(header.companyReviewLink || header.companyReviewModel?.desktopCompanyLink || header.companyReviewModel?.mobileCompanyLink || '');
     record['企業評価'] = ratings.rating ?? '';
     record['企業口コミ件数'] = ratings.count ?? '';
     record['返信率企業headline'] = responsive.headline || '';
@@ -906,7 +955,9 @@
     record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', 'label:benefits']);
     record['社会保険'] = pickSegment(segMap, ['社会保険', 'label:social-insurance']);
     record['職場環境'] = pickSegment(segMap, ['職場環境', 'label:work-environment']);
+    record['応募方法'] = pickSegment(segMap, ['応募方法', 'label:apply-method']);
     record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', 'label:apply-info']);
+    record['その他'] = pickSegment(segMap, ['その他', 'label:other']);
     record['企業名詳細'] = semanticCompanyName;
     record['本社所在地'] = pickSegment(segMap, ['本社所在地', 'label:company-location']);
     record['業種'] = pickSegment(segMap, ['業種', 'label:company-industry']);
@@ -2231,11 +2282,11 @@
       const canonicalUrl = canonicalViewJobUrl(jobKey, location.href) || normalizeUrl(location.href);
       const startedAt = nowText();
       const sessionId = makeSessionId();
-      const searchMeta = mergeSearchMeta({
+      const searchMeta = {
         '取得セッションID': sessionId,
         'クロール開始日時': startedAt,
         '取得プロファイル': getProfileLabel()
-      }, deriveSearchMetaFromUrl(canonicalUrl));
+      };
       const savedRecord = applySearchMetaToRecord(record, searchMeta);
 
       const item = {
