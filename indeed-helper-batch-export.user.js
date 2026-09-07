@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      1.8.3
-// @description  Indeed求人ページから求人情報を単発/一括でTSV出力。通常操作を簡素化し、詳細機能を折りたたみメニューへ整理
+// @version      2.0.0
+// @description  現行Indeedの検索結果・求人詳細・Indeed解釈・ユーザー文脈を単発/一括でTSV出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @updateURL    https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/indeed-helper-batch-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/tsicb/tampermonkey-scripts/main/indeed-helper-batch-export.user.js
 // @run-at       document-idle
@@ -15,101 +18,123 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v1';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v1';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v2';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v2';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
+  const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v1';
+  const ARRAY_SEP = '::';
+  let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
+  let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
 
   const HEADERS = [
+    '取得セッションID',
+    'クロール開始日時',
+    '詳細取得日時',
+    '取得プロファイル',
+    'ログイン状態',
     '取得URL',
+    'canonical URL',
     'ページタイトル',
+    '検索URL',
+    '検索キーワード',
+    '検索勤務地',
+    '検索半径',
+    '検索start値',
+    '検索ページ番号',
+    '検索総件数',
+    '関連検索候補',
+    '検索条件JSON',
+    '次ページURL',
+    'ページ内表示順',
     '検索結果元リンク',
     '検索結果リンク種別',
     '検索結果スポンサー判定',
     '検索結果スポンサー根拠',
+    '検索結果新着表示',
+    '検索結果HiringEvent',
+    '検索時求人タイトル',
+    '検索時会社名',
+    '検索時勤務地',
+    '検索時給与',
+    '検索時雇用形態',
+    '検索時タグ',
+    '検索時スニペット',
+    '検索時会社評価',
+    '検索カード属性JSON',
     '詳細ページスポンサー判定',
-    '詳細ページスポンサー企業キー',
-    '詳細ページクリック追跡URL',
     'requestPath',
     '求人キー',
     '求人タイトル',
-    '標準化された職種名',
-    '参照番号',
+    'Indeed標準職種名',
     '言語',
+    '国',
+    '雇用形態表示',
+    '雇用形態コード',
+    'リモート求人',
+    'HiringEvent',
+    'インターン求人',
     '会社名',
-    'ソース企業名',
-    'ソース企業キー',
+    '求人本文内企業名',
+    '親会社名',
     '会社ページURL',
     '会社口コミURL',
-    '企業キー',
-    '企業tier',
-    '企業相対ページURL',
+    '企業評価',
     '企業口コミ件数',
-    '企業総合評価件数',
-    '企業総合評価値',
+    '返信率企業headline',
+    '返信率企業description',
+    'responseRate',
+    'averageResponseInDays',
     '勤務地表示',
-    '勤務地短縮',
-    '住所',
+    '勤務地完全住所',
     '郵便番号',
-    '地方区分',
     '都道府県',
-    '市区町村',
-    '行政区',
-    '町名等',
+    '市区町村相当',
+    'streetAddress',
     '国コード',
-    '地方コード',
-    '都道府県コード',
-    '市区町村コード',
-    '行政区コード',
-    '丁目番地',
     '緯度',
     '経度',
-    '雇用形態',
-    'シフト勤務体系',
-    '勤務制度',
+    '勤務地備考',
+    '交通アクセス',
     '給与テキスト',
     '給与最小',
     '給与最大',
     '給与通貨',
     '給与種別',
     '給与ソース',
-    '報酬内部キー',
-    'Indeed掲載日時',
-    '公開日時',
-    '募集期限',
+    '給与詳細',
+    '給与例',
+    '掲載日時',
     '掲載経過表示',
-    '募集終了フラグ',
-    '直接URL',
-    'フィードキー',
-    'フィード種別',
-    'フィードisDradis',
-    '応募スコープ',
-    'IndeedApplyキー',
-    'IndeedApply pingbackUrl',
-    'IndeedApply continueUrl',
-    'IndeedApply advnum',
-    'IndeedApplyボタン種別',
-    '写真数',
-    '写真URL一覧',
-    '写真altText一覧',
-    '職種一覧',
-    '職種キー一覧',
-    '最有力職種キー',
-    '企業提供職種',
-    '属性一覧',
-    '企業提供属性',
-    '福利厚生属性',
-    '社会保険属性',
-    '急募フラグ',
-    '大量採用フラグ',
-    '再掲載フラグ',
-    '最新掲載フラグ',
-    '配置案件フラグ',
-    'organicApplyStarts',
-    '積極採用中',
-    '返信率の高い企業',
-    '過去30日間に Indeed を通じて75%以上の応募に返信',
-    'responseRate',
-    'averageResponseInDays',
+    '募集期限',
+    '募集終了判定',
+    'Indeed掲載ソース',
+    'originalJobLink',
+    'IndeedApply有無',
+    'directApply',
+    'Applyボタン種別',
+    'Apply表示テキスト',
+    '求人写真数',
+    '求人写真URL一覧',
+    '求人写真alt一覧',
+    '企業ロゴURL',
+    '企業ヘッダー画像URL',
+    'Indeed表示タグ',
+    'jobOccupations ID一覧',
+    'Indeed職種分類名一覧',
+    'Indeed職種分類ID一覧',
+    'occupationComparison JSON',
+    'Indeed抽出属性名一覧',
+    'Indeed抽出属性ID一覧',
+    '属性タイプID一覧',
+    'jobProvenance一覧',
+    'jobRequirementStrength一覧',
+    'attributeComparison JSON',
+    'jobFlair headline',
+    'jobFlair description',
+    'jobFlair eligible',
+    'Indeed関連検索what',
+    'Indeed関連検索where',
     '本文全文',
     '仕事内容',
     '求めている人材',
@@ -117,18 +142,46 @@
     '勤務形態',
     '休日休暇',
     '勤務地所在地',
-    '交通アクセス',
-    '給与詳細',
-    '給与例',
     '試用期間',
     '待遇福利厚生',
     '社会保険',
+    '職場環境',
     '選考プロセス',
     '企業名詳細',
     '本社所在地',
     '業種',
     '代表者名',
-    '代表電話番号'
+    '代表電話番号',
+    'semanticSegments JSON',
+    'recentQueryString',
+    '詳細到達検索what',
+    '詳細到達検索where',
+    'currentJobState',
+    'resume trafficLight',
+    'encouragement trafficLight',
+    'encouragement score',
+    'encouragement strategy',
+    'matchingSalary',
+    'minimumPayPreferencePresent',
+    'userMinimumPayAmount',
+    'userMinimumPaySalaryType',
+    'attribute matchType一覧',
+    'attribute jsProvenance一覧',
+    'occupation matchType一覧',
+    'occupation jsProvenance一覧',
+    'userContext JSON',
+    '取得ステータス',
+    '取得エラー理由',
+    '詳細取得ソース',
+    '_initialData有無',
+    'jobInfoWrapperModel有無',
+    'salaryInfoModel有無',
+    'semanticSegmentModels有無',
+    'JSON-LD JobPosting有無',
+    'oneGraphMatchComparison有無',
+    '主要項目取得数',
+    '全項目取得数',
+    '取得スキーマVersion'
   ];
 
   function isObject(v) {
@@ -150,10 +203,18 @@
 
   function formatDateTime(value) {
     if (value === null || value === undefined || value === '') return '';
-    const num = Number(value);
-    if (!Number.isFinite(num)) return '';
-    const d = new Date(num);
-    if (Number.isNaN(d.getTime())) return '';
+
+    let d = null;
+    if (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value).trim())) {
+      let num = Number(value);
+      if (!Number.isFinite(num)) return '';
+      if (num > 0 && num < 100000000000) num *= 1000;
+      d = new Date(num);
+    } else {
+      d = new Date(String(value));
+    }
+
+    if (!d || Number.isNaN(d.getTime())) return '';
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
 
@@ -174,26 +235,87 @@
       .trim();
   }
 
+  function normalizeMultiline(value) {
+    return textify(value)
+      .replace(/\t/g, ' ')
+      .replace(/[ \f\v]+\n/g, '\n')
+      .replace(/\n[ \f\v]+/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ ]{2,}/g, ' ')
+      .trim();
+  }
+
+  function toTsvCell(value) {
+    if (value === null || value === undefined) return '';
+    let text = typeof value === 'string' ? value : String(value);
+    return textify(text)
+      .replace(/\t/g, ' ')
+      .replace(/\n+/g, '<BR>')
+      .replace(/[ ]{2,}/g, ' ')
+      .trim();
+  }
+
+  function safeJsonStringify(value) {
+    if (value === null || value === undefined) return '';
+    try {
+      return JSON.stringify(value);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function uniqueStrings(values) {
+    const out = [];
+    const seen = new Set();
+    for (const v of values || []) {
+      const s = normalizeText(v);
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  }
+
+  function makeSessionId() {
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+    return `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function getProfileLabel() {
+    try {
+      return localStorage.getItem(PROFILE_LABEL_KEY) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function setProfileLabel(value) {
+    try {
+      localStorage.setItem(PROFILE_LABEL_KEY, normalizeText(value));
+    } catch (e) {}
+  }
+
   function stripHtml(html) {
     if (!html) return '';
     const doc = new DOMParser().parseFromString(String(html), 'text/html');
-    return normalizeText(doc.body ? (doc.body.textContent || '') : '');
+    const body = doc.body;
+    if (!body) return '';
+    body.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+    body.querySelectorAll('p,div,li,h1,h2,h3,h4,h5,h6,tr').forEach(el => {
+      if (el.nextSibling) el.appendChild(doc.createTextNode('\n'));
+    });
+    return normalizeMultiline(body.textContent || '');
   }
 
   function joinLabels(arr, key = 'label') {
     if (!Array.isArray(arr)) return '';
-    return arr
-      .map(x => (x && x[key] != null ? String(x[key]) : ''))
-      .filter(Boolean)
-      .join(' | ');
+    return uniqueStrings(arr.map(x => (x && x[key] != null ? String(x[key]) : ''))).join(ARRAY_SEP);
   }
 
   function joinValues(arr) {
     if (!Array.isArray(arr)) return '';
-    return arr
-      .map(x => (x == null ? '' : String(x)))
-      .filter(Boolean)
-      .join(' | ');
+    return uniqueStrings(arr.map(x => (x == null ? '' : String(x)))).join(ARRAY_SEP);
   }
 
   function boolText(v) {
@@ -311,189 +433,234 @@
   }
 
   function getCandidateRoots() {
-    const roots = [];
-
-    if (isObject(window._initialData)) roots.push(window._initialData);
-    if (isObject(window.__NEXT_DATA__)) roots.push(window.__NEXT_DATA__);
-
-    const scripts = Array.from(document.scripts || []);
-    for (const s of scripts) {
-      const txt = s.textContent || '';
-      if (!txt) continue;
-
-      if (txt.includes('window._initialData')) {
-        const objText = extractAssignedObjectText(txt, ['window._initialData', '_initialData']);
-        const parsed = safeJsonParse(objText);
-        if (parsed) roots.push(parsed);
-      }
-
-      if (txt.includes('window.__NEXT_DATA__') || txt.includes('__NEXT_DATA__')) {
-        const objText = extractAssignedObjectText(txt, ['window.__NEXT_DATA__', '__NEXT_DATA__']);
-        const parsed = safeJsonParse(objText);
-        if (parsed) roots.push(parsed);
-      }
+    const cacheUrl = location.href;
+    if (
+      candidateRootsCache.url === cacheUrl &&
+      (candidateRootsCache.roots.length || Date.now() - candidateRootsCache.checkedAt < 3000)
+    ) {
+      return candidateRootsCache.roots;
     }
 
+    const roots = [];
+    if (isObject(window._initialData)) {
+      roots.push(window._initialData);
+      candidateRootsCache = { url: cacheUrl, roots, checkedAt: Date.now() };
+      return roots;
+    }
+
+    const scripts = Array.from(document.scripts || []);
+    for (const script of scripts) {
+      const txt = script.textContent || '';
+      if (!txt.includes('window._initialData')) continue;
+      const objText = extractAssignedObjectText(txt, ['window._initialData', '_initialData']);
+      const parsed = safeJsonParse(objText);
+      if (parsed) roots.push(parsed);
+      if (roots.length) break;
+    }
+
+    candidateRootsCache = { url: cacheUrl, roots, checkedAt: Date.now() };
     return roots;
   }
 
-  function findBundleFromRoot(root) {
-    const body =
-      deepFind(root, n =>
-        isObject(n) &&
-        (
-          n.hostQueryExecutionResult ||
-          n.jobInfoWrapperModel ||
-          n.salaryInfoModel ||
-          n.jobMetadataFooterModel
-        )
-      ) || null;
+  function findCurrentDetailBody(root) {
+    if (!isObject(root)) return null;
 
-    const job =
-      (body && body.hostQueryExecutionResult?.data?.jobData?.results?.[0]?.job) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        typeof n.key === 'string' &&
-        typeof n.title === 'string' &&
-        (
-          n.sourceEmployerName ||
-          n.location ||
-          n.url ||
-          n.description ||
-          n.jobTypes ||
-          n.attributes
-        )
-      ) || null;
+    const candidates = [
+      root,
+      root?.autoOpenTwoPaneViewjobResponse?.body,
+      root?.viewjobResponse?.body,
+      root?.viewJobResponse?.body
+    ].filter(isObject);
 
-    if (!job) return null;
+    for (const candidate of candidates) {
+      if (candidate?.jobInfoWrapperModel?.jobInfoModel) return candidate;
+    }
 
-    const jobInfoModel =
-      (body && body.jobInfoWrapperModel?.jobInfoModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        (
-          n.jobInfoHeaderModel ||
-          n.sectionedJobInfoModel ||
-          n.sanitizedJobDescription
-        )
-      ) || null;
+    return deepFind(root, n =>
+      isObject(n) &&
+      isObject(n.jobInfoWrapperModel) &&
+      isObject(n.jobInfoWrapperModel.jobInfoModel) &&
+      (
+        typeof n.jobKey === 'string' ||
+        typeof n.jobTitle === 'string' ||
+        isObject(n.salaryInfoModel) ||
+        isObject(n.jobMetadataFooterModel)
+      )
+    );
+  }
 
-    const headerModel =
-      (jobInfoModel && jobInfoModel.jobInfoHeaderModel) ||
-      (body && body.jobInfoWrapperModel?.jobInfoModel?.jobInfoHeaderModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        (
-          n.companyOverviewLink ||
-          n.companyReviewLink ||
-          n.formattedLocation ||
-          n.companyName ||
-          n.employerResponsiveCardModel ||
-          n.jobFlairLabelModel
-        )
-      ) || null;
+  function findCurrentBundleFromRoot(root) {
+    const body = findCurrentDetailBody(root);
+    if (!body) return null;
 
-    const sectionedModel =
-      (body && body.jobInfoWrapperModel?.sectionedJobInfoModel) ||
-      deepFind(root, n =>
-        isObject(n) && Array.isArray(n.semanticSegmentModels)
-      ) || null;
-
-    const salaryInfo =
-      (body && body.salaryInfoModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        ('salaryText' in n) &&
-        (
-          'salaryType' in n ||
-          'salarySource' in n ||
-          'salaryMin' in n ||
-          'salaryMax' in n
-        )
-      ) || null;
-
-    const footerModel =
-      (body && body.jobMetadataFooterModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        (
-          ('age' in n) ||
-          ('relativeDate' in n)
-        )
-      ) || null;
-
+    const wrapper = body.jobInfoWrapperModel || {};
+    const jobInfoModel = wrapper.jobInfoModel || {};
+    const headerModel = jobInfoModel.jobInfoHeaderModel || {};
+    const sectionedModel = wrapper.sectionedJobInfoModel || null;
+    const salaryInfo = body.salaryInfoModel || {};
+    const footerModel = body.jobMetadataFooterModel || {};
+    const oneGraphMatchComparison = body.oneGraphMatchComparison || null;
     const employerResponsiveCardModel =
-      (body && body.employerResponsiveCardModel) ||
-      (headerModel && headerModel.employerResponsiveCardModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        (
-          ('responseRate' in n) ||
-          ('averageResponseInDays' in n)
-        ) &&
-        (
-          'headline' in n ||
-          'description' in n
-        )
-      ) || null;
+      headerModel.employerResponsiveCardModel ||
+      body.employerResponsiveCardModel ||
+      null;
+    const jobFlairLabelModel = headerModel.jobFlairLabelModel || null;
 
-    const jobFlairLabelModel =
-      (headerModel && headerModel.jobFlairLabelModel) ||
-      deepFind(root, n =>
-        isObject(n) &&
-        ('eligible' in n) &&
-        ('headline' in n) &&
-        ('description' in n)
-      ) || null;
+    const jobKey =
+      body.jobKey ||
+      body.reportContentModel?.jobKey ||
+      body.salaryGuideModel?.jobKey ||
+      body.indeedApplyButtonContainer?.indeedApplyButtonAttributes?.jk ||
+      getJobKeyFromUrl(location.href);
+    const jobTitle = headerModel.jobTitle || body.jobTitle || sectionedModel?.jobTitle || '';
+
+    if (!jobKey && !jobTitle) return null;
 
     return {
       root,
       body,
-      job,
+      wrapper,
       jobInfoModel,
       headerModel,
       sectionedModel,
       salaryInfo,
       footerModel,
+      oneGraphMatchComparison,
       employerResponsiveCardModel,
-      jobFlairLabelModel
+      jobFlairLabelModel,
+      jobKey,
+      jobTitle
     };
   }
 
   function getBundle() {
     const roots = getCandidateRoots();
+    const urlJk = getJobKeyFromUrl(location.href);
+    let fallback = null;
+
     for (const root of roots) {
-      const bundle = findBundleFromRoot(root);
-      if (bundle) return bundle;
+      const bundle = findCurrentBundleFromRoot(root);
+      if (!bundle) continue;
+      if (!fallback) fallback = bundle;
+      if (!urlJk || bundle.jobKey === urlJk) return bundle;
     }
-    return null;
+
+    return fallback;
+  }
+
+  function getLdJobPosting() {
+    const cacheUrl = location.href;
+    if (
+      ldJobPostingCache.url === cacheUrl &&
+      (ldJobPostingCache.value || Date.now() - ldJobPostingCache.checkedAt < 3000)
+    ) {
+      return ldJobPostingCache.value;
+    }
+
+    let found = null;
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    outer: for (const script of scripts) {
+      try {
+        const parsed = JSON.parse(script.textContent || '');
+        const candidates = Array.isArray(parsed) ? parsed : [parsed];
+        for (const candidate of candidates) {
+          if (candidate?.['@type'] === 'JobPosting') {
+            found = candidate;
+            break outer;
+          }
+          if (Array.isArray(candidate?.['@graph'])) {
+            const job = candidate['@graph'].find(x => x?.['@type'] === 'JobPosting');
+            if (job) {
+              found = job;
+              break outer;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    ldJobPostingCache = { url: cacheUrl, value: found, checkedAt: Date.now() };
+    return found;
+  }
+
+  function getSemanticSegments(bundle) {
+    const segs = bundle?.sectionedModel?.semanticSegmentModels;
+    return Array.isArray(segs) ? segs : [];
   }
 
   function buildSegmentMap(bundle) {
     const map = {};
-    const sectioned = bundle?.sectionedModel;
-    const job = bundle?.job;
-
-    const segs1 = Array.isArray(sectioned?.semanticSegmentModels) ? sectioned.semanticSegmentModels : [];
-    const segs2 = Array.isArray(job?.description?.semanticSegments) ? job.description.semanticSegments : [];
-
-    for (const seg of segs1) {
-      const headerKey = cleanHeaderKey(seg.header || '');
-      const labelKey = seg.semanticLabel ? `label:${seg.semanticLabel}` : '';
-      const value = stripHtml(seg.sanitizedContent || seg.content || '');
+    for (const seg of getSemanticSegments(bundle)) {
+      const headerKey = cleanHeaderKey(seg?.header || '');
+      const labelKey = seg?.semanticLabel ? `label:${seg.semanticLabel}` : '';
+      const value = stripHtml(seg?.sanitizedContent || seg?.content || '');
       if (headerKey && !map[headerKey]) map[headerKey] = value;
       if (labelKey && !map[labelKey]) map[labelKey] = value;
     }
-
-    for (const seg of segs2) {
-      const headerKey = cleanHeaderKey(seg.header || '');
-      const labelKey = seg.label ? `seg:${seg.label}` : '';
-      const value = stripHtml(seg.content || seg.sanitizedContent || '');
-      if (headerKey && !map[headerKey]) map[headerKey] = value;
-      if (labelKey && !map[labelKey]) map[labelKey] = value;
-    }
-
     return map;
+  }
+
+  function getCanonicalUrl(jobKey = '') {
+    const canonical = document.querySelector('link[rel="canonical"]')?.href || '';
+    if (canonical && /\/viewjob/i.test(canonical)) return normalizeUrl(canonical);
+    return canonicalViewJobUrl(jobKey || getJobKeyFromUrl(location.href), location.href) || normalizeUrl(location.href);
+  }
+
+  function getUrlLike(value) {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    return value.url || value.href || value.link || value.originalJobLink || '';
+  }
+
+  function getRelatedLinkValues(body, key) {
+    if (!Array.isArray(body?.relatedLinks)) return '';
+    return joinValues(body.relatedLinks.map(x => x?.[key] || ''));
+  }
+
+  function getSearchRecentQuery(body) {
+    const raw = body?.indeedApplyButtonContainer?.indeedApplyButtonAttributes?.recentsearchquery || '';
+    if (!raw) return { what: '', where: '' };
+    try {
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return {
+        what: normalizeText(parsed?.what || ''),
+        where: normalizeText(parsed?.where || '')
+      };
+    } catch (e) {
+      return { what: '', where: '' };
+    }
+  }
+
+  function comparisonData(bundle) {
+    const one = bundle?.oneGraphMatchComparison || {};
+    const attrs = Array.isArray(one.attributeComparisons) ? one.attributeComparisons : [];
+    const occs = Array.isArray(one.occupationComparisons) ? one.occupationComparisons : [];
+    return { one, attrs, occs };
+  }
+
+  function semanticSegmentsJson(bundle) {
+    const knownLabels = new Set([
+      'job-description','qualification','work-hours','working-system','holidays','full-address','work-location',
+      'commute-info','pay','salary-example','probation-conditions','benefits','social-insurance','work-environment',
+      'apply-info','company-name','company-location','company-industry','company-president','contact-tel'
+    ]);
+    const labels = [];
+    const unknown = [];
+
+    for (const seg of getSemanticSegments(bundle)) {
+      const semanticLabel = seg?.semanticLabel || '';
+      const header = normalizeText(seg?.header || '');
+      labels.push({ semanticLabel, header });
+      if (!knownLabels.has(semanticLabel)) {
+        unknown.push({
+          semanticLabel,
+          header,
+          content: stripHtml(seg?.sanitizedContent || seg?.content || '')
+        });
+      }
+    }
+
+    return safeJsonStringify({ labels, unknown });
   }
 
   function pickSegment(map, keys) {
@@ -564,6 +731,8 @@
     if (isIndeedSearchPath(decodedPath)) return true;
     if (isIndeedSearchPath(rawPath)) return true;
     if (/\/%E6%B1%82%E4%BA%BA\/?$/i.test(rawPath)) return true;
+    if (/\/q-.*求人\.html\/?$/i.test(decodedPath)) return true;
+    if (/\/q-.*%E6%B1%82%E4%BA%BA\.html\/?$/i.test(rawPath)) return true;
 
     return false;
   }
@@ -571,237 +740,252 @@
   function isSearchResultsPage() {
     if (isIndeedSearchResultsUrl(location.href)) return true;
 
-    if (
-      document.querySelector('a[href*="/viewjob?"], a[href*="/rc/clk"], a[href*="/pagead/"]') &&
-      isIndeedSearchResultsUrl(location.href)
-    ) {
-      return true;
-    }
+    const hasJobCards = Boolean(document.querySelector('a[data-jk][href], a[href*="/viewjob?"], a[href*="/rc/clk"], a[href*="/pagead/"]'));
+    if (!hasJobCards) return false;
 
-    return false;
+    const root = getSearchInitialData();
+    return Boolean(root.totalJobCount != null || root.uniqueJobsCount != null || Array.isArray(root.relatedQueries));
   }
 
   function buildRecord() {
     const record = buildEmptyRecord();
+    const bundle = getBundle();
+    const ld = getLdJobPosting();
 
+    record['詳細取得日時'] = nowText();
+    record['取得プロファイル'] = getProfileLabel();
     record['取得URL'] = location.href;
     record['ページタイトル'] = document.title || '';
-
-    const bundle = getBundle();
+    record['_initialData有無'] = boolText(getCandidateRoots().length > 0);
+    record['JSON-LD JobPosting有無'] = boolText(Boolean(ld));
+    record['取得スキーマVersion'] = SCHEMA_VERSION;
 
     if (!bundle) {
-      record['求人タイトル'] = getDomText(['h1', '[data-testid="viewJobTitle"]']);
-      record['会社名'] = getDomText(['[data-testid="inlineHeader-companyName"]', 'main a']);
-      record['勤務地表示'] = getDomText(['[data-testid="job-location"]', 'main']);
-      record['給与テキスト'] = getDomText(['#salaryInfoAndJobType', '[data-testid="attribute_snippet_testid"]']);
-      record['本文全文'] = getDomText(['main']);
-      return { record, source: 'dom-fallback' };
+      record['取得ステータス'] = 'ERROR';
+      record['取得エラー理由'] = 'current _initialData detail model not found';
+      record['詳細取得ソース'] = 'none';
+      return { record, source: 'error' };
     }
 
     const root = bundle.root || {};
-    const job = bundle.job || {};
     const body = bundle.body || {};
-    const headerModel = bundle.headerModel || {};
-    const salaryInfo = bundle.salaryInfo || {};
-    const footerModel = bundle.footerModel || {};
-    const employerResponsiveCardModel = bundle.employerResponsiveCardModel || {};
-    const jobFlairLabelModel = bundle.jobFlairLabelModel || {};
-    const employer = job?.employer || {};
-    const employerRating = employer?.ugcStats?.ratings?.overallRating || {};
-    const indeedApplyButtonContainer =
-      body?.indeedApplyButtonContainer ||
-      root?.indeedApplyButtonContainer ||
-      {};
-    const indeedApplyButtonAttributes = indeedApplyButtonContainer?.indeedApplyButtonAttributes || {};
-    const indeedApplyButtonModel = indeedApplyButtonContainer?.indeedApplyButtonModel || {};
-    const employerResponsiveHeadline = normalizeText(employerResponsiveCardModel?.headline || '');
-    const employerResponsiveDescription = normalizeText(employerResponsiveCardModel?.description || '');
-    const jobFlairHeadline = normalizeText(jobFlairLabelModel?.headline || '');
+    const jobInfoModel = bundle.jobInfoModel || {};
+    const header = bundle.headerModel || {};
+    const sectioned = bundle.sectionedModel || {};
+    const salary = bundle.salaryInfo || {};
+    const footer = bundle.footerModel || {};
+    const responsive = bundle.employerResponsiveCardModel || {};
+    const flair = bundle.jobFlairLabelModel || {};
     const segMap = buildSegmentMap(bundle);
+    const { one, attrs, occs } = comparisonData(bundle);
+    const recentApplySearch = getSearchRecentQuery(body);
+    const ratings = header.ratingsModel || {};
+    const companyImages = header.companyImagesModel || {};
+    const jobPhotos = body.japanJobPhotosModel || {};
+    const applyContainer = body.indeedApplyButtonContainer || {};
+    const applyAttrs = applyContainer.indeedApplyButtonAttributes || {};
+    const applyModel = applyContainer.indeedApplyButtonModel || {};
+    const ldLocation = Array.isArray(ld?.jobLocation) ? (ld.jobLocation[0] || {}) : (ld?.jobLocation || {});
+    const address = ldLocation?.address || {};
+    const geo = ldLocation?.geo || address?.geo || {};
+    const ldSalary = ld?.baseSalary || {};
+    const ldSalaryValue = ldSalary?.value || {};
+    const semanticFullAddress = pickSegment(segMap, ['勤務地所在地', 'label:full-address']);
+    const semanticCompanyName = pickSegment(segMap, ['企業名', 'label:company-name']);
 
-    const photoUrls = Array.isArray(job.photos)
-      ? job.photos.map(p => p?.w800 || p?.w400 || p?.w1600 || p?.url || '').filter(Boolean)
-      : [];
+    record['ログイン状態'] = boolText(body.loggedIn ?? root.loggedIn ?? body.saveJobButtonContainerModel?.isLoggedIn);
+    record['canonical URL'] = getCanonicalUrl(bundle.jobKey);
+    record['詳細ページスポンサー判定'] = boolText(body.sponsored ?? root.sponsored);
+    record['requestPath'] = body.requestPath || root.requestPath || '';
+    record['求人キー'] = bundle.jobKey || '';
+    record['求人タイトル'] = bundle.jobTitle || '';
+    record['Indeed標準職種名'] = header.jobNormTitle || '';
+    record['言語'] = body.jobLanguage || body.language || root.jobLanguage || root.language || '';
+    record['国'] = body.jobCountry || body.country || root.jobCountry || root.country || '';
+    record['雇用形態表示'] = body?.jobInfoWrapperModel?.jobInfoModel?.jobMetadataHeaderModel?.jobType || sectioned?.formattedJobTypes?.content || '';
+    record['雇用形態コード'] = Array.isArray(ld?.employmentType) ? joinValues(ld.employmentType) : (ld?.employmentType || '');
+    record['リモート求人'] = boolText(header.remoteLocation ?? body.remoteLocation);
+    record['HiringEvent'] = boolText(body.isHiringEvent);
+    record['インターン求人'] = boolText(body.japanInternshipJob);
 
-    const photoAltTexts = Array.isArray(job.photos)
-      ? job.photos.map(p => p?.altText || '').filter(Boolean)
-      : [];
+    record['会社名'] = header.companyName || semanticCompanyName || '';
+    record['求人本文内企業名'] = semanticCompanyName;
+    record['親会社名'] = header.parentCompanyName || '';
+    record['会社ページURL'] = header.companyOverviewLink || '';
+    record['会社口コミURL'] = header.companyReviewLink || header.companyReviewModel?.desktopCompanyLink || header.companyReviewModel?.mobileCompanyLink || '';
+    record['企業評価'] = ratings.rating ?? '';
+    record['企業口コミ件数'] = ratings.count ?? '';
+    record['返信率企業headline'] = responsive.headline || '';
+    record['返信率企業description'] = responsive.description || '';
+    record['responseRate'] = responsive.responseRate ?? '';
+    record['averageResponseInDays'] = responsive.averageResponseInDays ?? '';
 
-    const companyOverviewLink = headerModel.companyOverviewLink || '';
-    const companyReviewLink = headerModel.companyReviewLink || '';
+    record['勤務地表示'] = header.formattedLocation || body.jobLocation || '';
+    record['勤務地完全住所'] = semanticFullAddress || address.streetAddress || '';
+    record['郵便番号'] = address.postalCode || '';
+    record['都道府県'] = address.addressRegion || '';
+    record['市区町村相当'] = address.addressLocality || '';
+    record['streetAddress'] = address.streetAddress || '';
+    record['国コード'] = address.addressCountry || body.jobCountry || '';
+    record['緯度'] = geo.latitude ?? address.latitude ?? ldLocation.latitude ?? '';
+    record['経度'] = geo.longitude ?? address.longitude ?? ldLocation.longitude ?? '';
+    record['勤務地備考'] = pickSegment(segMap, ['勤務地備考', 'label:work-location']);
+    record['交通アクセス'] = pickSegment(segMap, ['交通・アクセス', 'label:commute-info']);
 
-    const fullText = normalizeText(job?.description?.text || stripHtml(job?.description?.html || ''));
+    record['給与テキスト'] = salary.salaryText || '';
+    record['給与最小'] = salary.salaryMin ?? ldSalaryValue.minValue ?? ldSalaryValue.value ?? '';
+    record['給与最大'] = salary.salaryMax ?? ldSalaryValue.maxValue ?? ldSalaryValue.value ?? '';
+    record['給与通貨'] = salary.salaryCurrency || ldSalary.currency || '';
+    record['給与種別'] = salary.salaryType || ldSalaryValue.unitText || '';
+    record['給与ソース'] = salary.salarySource || '';
+    record['給与詳細'] = pickSegment(segMap, ['給与詳細', 'label:pay']);
+    record['給与例'] = pickSegment(segMap, ['給与例', 'label:salary-example']);
 
-    record['詳細ページスポンサー判定'] = boolText(root?.sponsored ?? body?.sponsored);
-    record['詳細ページスポンサー企業キー'] = job?.sponsoredEmployerKey || '';
-    record['詳細ページクリック追跡URL'] = job?.tracking?.jobClick?.url || '';
-    record['requestPath'] = root?.requestPath || body?.requestPath || '';
+    record['掲載日時'] = formatDateTime(ld?.datePosted || body.datePublished || root.datePublished);
+    record['掲載経過表示'] = footer.age || footer.relativeDate || '';
+    record['募集期限'] = formatDateTime(ld?.validThrough);
+    record['募集終了判定'] = boolText(Boolean(jobInfoModel.expiredJobMetadataModel || jobInfoModel.showExpiredHeader || body.showExpiredHeader));
+    record['Indeed掲載ソース'] = footer.source || '';
+    record['originalJobLink'] = getUrlLike(footer.originalJobLink || body.originalJobLinkModel || body.originalJobLink);
+    record['IndeedApply有無'] = boolText(Boolean(applyAttrs.jk || applyContainer.indeedApplyAttributes || applyModel.contentHtml));
+    record['directApply'] = boolText(ld?.directApply);
+    record['Applyボタン種別'] = applyModel.buttonType || '';
+    record['Apply表示テキスト'] = stripHtml(applyModel.contentHtml || '');
 
-    record['求人キー'] = job?.key || body?.jobKey || '';
-    record['求人タイトル'] = job?.title || body?.jobTitle || getDomText(['h1']);
-    record['標準化された職種名'] = job?.normalizedTitle || '';
-    record['参照番号'] = job?.refNum || '';
-    record['言語'] = job?.language || body?.language || '';
+    const photoUrls = Array.isArray(jobPhotos.urls) ? jobPhotos.urls : [];
+    const photoAlts = Array.isArray(jobPhotos.altTexts) ? jobPhotos.altTexts : [];
+    record['求人写真数'] = String(photoUrls.length || 0);
+    record['求人写真URL一覧'] = joinValues(photoUrls);
+    record['求人写真alt一覧'] = joinValues(photoAlts);
+    record['企業ロゴURL'] = companyImages.logoUrl || '';
+    record['企業ヘッダー画像URL'] = companyImages.headerImageUrl || '';
 
-    record['会社名'] = job?.sourceEmployerName || headerModel?.companyName || '';
-    record['ソース企業名'] = job?.source?.name || '';
-    record['ソース企業キー'] = job?.source?.key || '';
+    const jobTags = jobInfoModel.jobTagModel?.tags || sectioned.jobTagModel?.tags || [];
+    record['Indeed表示タグ'] = joinValues(jobTags);
 
-    record['会社ページURL'] = companyOverviewLink;
-    record['会社口コミURL'] = companyReviewLink;
+    record['jobOccupations ID一覧'] = joinValues(body.jobOccupations || []);
+    record['Indeed職種分類名一覧'] = joinValues(occs.map(x => x?.occupation?.label || ''));
+    record['Indeed職種分類ID一覧'] = joinValues(occs.map(x => x?.occupation?.suid || ''));
+    record['occupationComparison JSON'] = safeJsonStringify(occs.map(x => ({
+      label: x?.occupation?.label || '',
+      suid: x?.occupation?.suid || '',
+      matchType: x?.matchType || '',
+      jsProvenance: x?.jsProvenance || ''
+    })));
 
-    record['企業キー'] = employer?.key || '';
-    record['企業tier'] = employer?.tier || '';
-    record['企業相対ページURL'] = employer?.relativeCompanyPageUrl || '';
-    record['企業口コミ件数'] = employer?.ugcStats?.globalReviewCount ?? '';
-    record['企業総合評価件数'] = employerRating?.count ?? '';
-    record['企業総合評価値'] = employerRating?.value ?? '';
+    record['Indeed抽出属性名一覧'] = joinValues(attrs.map(x => x?.attribute?.label || ''));
+    record['Indeed抽出属性ID一覧'] = joinValues(attrs.map(x => x?.attribute?.suid || ''));
+    record['属性タイプID一覧'] = joinValues(attrs.map(x => x?.attribute?.profileAttributeTypeSuid || ''));
+    record['jobProvenance一覧'] = joinValues(attrs.map(x => x?.jobProvenance || ''));
+    record['jobRequirementStrength一覧'] = joinValues(attrs.map(x => x?.jobRequirementStrength || ''));
+    record['attributeComparison JSON'] = safeJsonStringify(attrs.map(x => ({
+      label: x?.attribute?.label || '',
+      suid: x?.attribute?.suid || '',
+      profileAttributeTypeSuid: x?.attribute?.profileAttributeTypeSuid || '',
+      interestedParty: x?.attribute?.interestedParty || '',
+      jobProvenance: x?.jobProvenance || '',
+      jobRequirementStrength: x?.jobRequirementStrength || '',
+      matchType: x?.matchType || '',
+      jsProvenance: x?.jsProvenance || ''
+    })));
 
-    record['勤務地表示'] = job?.location?.formatted?.long || headerModel?.formattedLocation || '';
-    record['勤務地短縮'] = job?.location?.formatted?.short || '';
-    record['住所'] = job?.location?.fullAddress || '';
-    record['郵便番号'] = job?.location?.postalCode || '';
-    record['地方区分'] = job?.location?.admin1Name || '';
-    record['都道府県'] = job?.location?.admin2Name || '';
-    record['市区町村'] = job?.location?.admin3Name || '';
-    record['行政区'] = job?.location?.admin4Name || '';
-    record['町名等'] = job?.location?.city || '';
+    record['jobFlair headline'] = flair.headline || '';
+    record['jobFlair description'] = flair.description || '';
+    record['jobFlair eligible'] = boolText(flair.eligible);
+    record['Indeed関連検索what'] = getRelatedLinkValues(body, 'what');
+    record['Indeed関連検索where'] = getRelatedLinkValues(body, 'where');
 
-    record['国コード'] = job?.location?.countryCode || '';
-    record['地方コード'] = job?.location?.admin1Code || '';
-    record['都道府県コード'] = job?.location?.admin2Code || '';
-    record['市区町村コード'] = job?.location?.admin3Code || '';
-    record['行政区コード'] = job?.location?.admin4Code || '';
-    record['丁目番地'] = job?.location?.streetAddress || '';
-
-    record['緯度'] = job?.location?.latitude ?? '';
-    record['経度'] = job?.location?.longitude ?? '';
-
-    record['雇用形態'] = joinLabels(job?.jobTypes) || normalizeText(bundle?.sectionedModel?.formattedJobTypes?.content || '');
-    record['シフト勤務体系'] = joinLabels(job?.shiftAndSchedule);
-    record['勤務制度'] = joinLabels(job?.workingSystem) || pickSegment(segMap, ['勤務形態', 'label:working-system']);
-
-    record['給与テキスト'] = salaryInfo?.salaryText || '';
-    record['給与最小'] = salaryInfo?.salaryMin ?? '';
-    record['給与最大'] = salaryInfo?.salaryMax ?? '';
-    record['給与通貨'] = salaryInfo?.salaryCurrency || '';
-    record['給与種別'] = salaryInfo?.salaryType || '';
-    record['給与ソース'] = salaryInfo?.salarySource || '';
-    record['報酬内部キー'] = job?.compensation?.key || '';
-
-    record['Indeed掲載日時'] = formatDateTime(job?.dateOnIndeed);
-    record['公開日時'] = formatDateTime(job?.datePublished);
-    record['募集期限'] = formatDateTime(job?.expirationDate);
-    record['掲載経過表示'] = footerModel?.age || footerModel?.relativeDate || '';
-    record['募集終了フラグ'] = boolText(job?.expired);
-
-    record['直接URL'] = job?.url || '';
-
-    record['フィードキー'] = job?.feed?.key || '';
-    record['フィード種別'] = job?.feed?.feedSourceType || '';
-    record['フィードisDradis'] = boolText(job?.feed?.isDradis);
-
-    record['応募スコープ'] = joinValues(job?.indeedApply?.scopes);
-    record['IndeedApplyキー'] = job?.indeedApply?.key || '';
-    record['IndeedApply pingbackUrl'] = indeedApplyButtonAttributes?.pingbackUrl || '';
-    record['IndeedApply continueUrl'] = indeedApplyButtonAttributes?.continueUrl || '';
-    record['IndeedApply advnum'] = indeedApplyButtonAttributes?.advnum || '';
-    record['IndeedApplyボタン種別'] = indeedApplyButtonModel?.buttonType || '';
-
-    record['写真数'] = photoUrls.length ? String(photoUrls.length) : '';
-    record['写真URL一覧'] = joinValues(photoUrls);
-    record['写真altText一覧'] = joinValues(photoAltTexts);
-
-    record['職種一覧'] = joinLabels(job?.occupations);
-    record['職種キー一覧'] = joinLabels(job?.occupations, 'key');
-    record['最有力職種キー'] = joinLabels(job?.occupationMostLikelySuids, 'key');
-    record['企業提供職種'] = joinLabels(job?.employerProvidedOccupations);
-
-    record['属性一覧'] = joinLabels(job?.attributes);
-    record['企業提供属性'] = joinLabels(job?.employerProvidedAttributes);
-    record['福利厚生属性'] = joinLabels(job?.benefits);
-    record['社会保険属性'] = joinLabels(job?.socialInsurance);
-
-    record['急募フラグ'] = boolText(job?.hiringDemand?.isUrgentHire);
-    record['大量採用フラグ'] = boolText(job?.hiringDemand?.isHighVolumeHiring);
-    record['再掲載フラグ'] = boolText(job?.isRepost);
-    record['最新掲載フラグ'] = boolText(job?.isLatestPost);
-    record['配置案件フラグ'] = boolText(job?.isPlacement);
-
-    record['organicApplyStarts'] = job?.jobStats?.organicApplyStarts ?? '';
-
-    record['積極採用中'] = jobFlairLabelModel
-      ? boolText(
-          jobFlairLabelModel?.eligible === true ||
-          jobFlairHeadline === '積極採用中'
-        )
-      : '';
-
-    record['返信率の高い企業'] = employerResponsiveCardModel
-      ? boolText(
-          employerResponsiveHeadline === '返信率の高い企業' ||
-          employerResponsiveCardModel?.responseRate != null ||
-          employerResponsiveCardModel?.averageResponseInDays != null
-        )
-      : '';
-
-    record['過去30日間に Indeed を通じて75%以上の応募に返信'] = employerResponsiveCardModel
-      ? boolText(
-          employerResponsiveDescription.includes('過去30日間に Indeed を通じて75%以上の応募に返信')
-        )
-      : '';
-
-    record['responseRate'] = employerResponsiveCardModel?.responseRate ?? '';
-    record['averageResponseInDays'] = employerResponsiveCardModel?.averageResponseInDays ?? '';
-
-    record['本文全文'] = fullText;
-
-    record['仕事内容'] = pickSegment(segMap, ['仕事内容', 'label:job-description', 'seg:JOB_DESCRIPTION']);
-    record['求めている人材'] = pickSegment(segMap, ['求めている人材', '応募資格', 'label:qualification', 'seg:QUALIFICATION']);
-    record['勤務時間詳細'] = pickSegment(segMap, ['勤務時間詳細', '勤務時間', 'label:work-hours', 'seg:WORK_HOURS']);
+    record['本文全文'] = stripHtml(jobInfoModel.sanitizedJobDescription || ld?.description || '');
+    record['仕事内容'] = pickSegment(segMap, ['仕事内容', 'label:job-description']);
+    record['求めている人材'] = pickSegment(segMap, ['求めている人材', '応募資格', 'label:qualification']);
+    record['勤務時間詳細'] = pickSegment(segMap, ['勤務時間詳細', '勤務時間', 'label:work-hours']);
     record['勤務形態'] = pickSegment(segMap, ['勤務形態', 'label:working-system']);
-    record['休日休暇'] = pickSegment(segMap, ['休日休暇', 'label:holidays', 'seg:HOLIDAYS']);
-    record['勤務地所在地'] = pickSegment(segMap, ['勤務地所在地', 'label:full-address']);
-    record['交通アクセス'] = pickSegment(segMap, ['交通・アクセス', 'アクセス（勤務地）', '最寄り駅', 'label:commute-info', 'seg:COMMUTE_INFO']);
-    record['給与詳細'] = pickSegment(segMap, ['給与詳細', '給与', 'label:pay', 'seg:PAY']);
-    record['給与例'] = pickSegment(segMap, ['給与例', 'label:salary-example', 'seg:SALARY_EXAMPLE']);
+    record['休日休暇'] = pickSegment(segMap, ['休日休暇', 'label:holidays']);
+    record['勤務地所在地'] = semanticFullAddress;
     record['試用期間'] = pickSegment(segMap, ['試用期間', 'label:probation-conditions']);
-    record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', '加入保険', 'label:benefits', 'seg:BENEFITS']);
+    record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', 'label:benefits']);
     record['社会保険'] = pickSegment(segMap, ['社会保険', 'label:social-insurance']);
-    record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', '応募の流れ', 'label:apply-info', 'seg:APPLY_INFO']);
-    record['企業名詳細'] = pickSegment(segMap, ['企業名', 'label:company-name']);
+    record['職場環境'] = pickSegment(segMap, ['職場環境', 'label:work-environment']);
+    record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', 'label:apply-info']);
+    record['企業名詳細'] = semanticCompanyName;
     record['本社所在地'] = pickSegment(segMap, ['本社所在地', 'label:company-location']);
     record['業種'] = pickSegment(segMap, ['業種', 'label:company-industry']);
     record['代表者名'] = pickSegment(segMap, ['代表者名', 'label:company-president']);
-    record['代表電話番号'] = pickSegment(segMap, ['代表電話番号', 'label:contact-tel']);
+    record['代表電話番号'] = pickSegment(segMap, ['代表電話番号', 'お問い合わせ電話番号', 'label:contact-tel']);
+    record['semanticSegments JSON'] = semanticSegmentsJson(bundle);
 
-    return { record, source: 'json' };
+    record['recentQueryString'] = body.recentQueryString || '';
+    record['詳細到達検索what'] = recentApplySearch.what;
+    record['詳細到達検索where'] = recentApplySearch.where;
+    record['currentJobState'] = body.saveJobButtonContainerModel?.currentJobState || '';
+    record['resume trafficLight'] = body.resumeEvaluationResult?.trafficLightSignal || jobInfoModel.resumeEvaluationResult?.trafficLightSignal || '';
+    record['encouragement trafficLight'] = one.encouragementToApply?.trafficLight || '';
+    record['encouragement score'] = one.encouragementToApply?.score ?? '';
+    record['encouragement strategy'] = one.encouragementToApply?.strategy || '';
+    record['matchingSalary'] = boolText(salary.matchingSalary);
+    record['minimumPayPreferencePresent'] = boolText(salary.minimumPayPreferencePresent);
+    record['userMinimumPayAmount'] = salary.userMinimumPayAmount ?? '';
+    record['userMinimumPaySalaryType'] = salary.userMinimumPaySalaryType || '';
+    record['attribute matchType一覧'] = joinValues(attrs.map(x => x?.matchType || ''));
+    record['attribute jsProvenance一覧'] = joinValues(attrs.map(x => x?.jsProvenance || ''));
+    record['occupation matchType一覧'] = joinValues(occs.map(x => x?.matchType || ''));
+    record['occupation jsProvenance一覧'] = joinValues(occs.map(x => x?.jsProvenance || ''));
+    record['userContext JSON'] = safeJsonStringify({
+      recentQueryString: record['recentQueryString'],
+      recentSearchQuery: recentApplySearch,
+      currentJobState: record['currentJobState'],
+      resumeTrafficLight: record['resume trafficLight'],
+      encouragementToApply: one.encouragementToApply || null,
+      matchingSalary: salary.matchingSalary ?? null,
+      minimumPayPreferencePresent: salary.minimumPayPreferencePresent ?? null,
+      userMinimumPayAmount: salary.userMinimumPayAmount ?? null,
+      userMinimumPaySalaryType: salary.userMinimumPaySalaryType ?? null,
+      attributeMatch: attrs.map(x => ({ label: x?.attribute?.label || '', matchType: x?.matchType || '', jsProvenance: x?.jsProvenance || '' })),
+      occupationMatch: occs.map(x => ({ label: x?.occupation?.label || '', matchType: x?.matchType || '', jsProvenance: x?.jsProvenance || '' }))
+    });
+
+    record['詳細取得ソース'] = bundle.body === root ? 'current-_initialData' : 'current-_initialData-nested';
+    record['jobInfoWrapperModel有無'] = boolText(Boolean(body.jobInfoWrapperModel));
+    record['salaryInfoModel有無'] = boolText(Boolean(body.salaryInfoModel));
+    record['semanticSegmentModels有無'] = boolText(getSemanticSegments(bundle).length > 0);
+    record['oneGraphMatchComparison有無'] = boolText(Boolean(bundle.oneGraphMatchComparison));
+
+    const majorFields = ['求人キー','求人タイトル','会社名','勤務地表示','雇用形態表示','本文全文'];
+    const majorCount = majorFields.filter(k => String(record[k] ?? '').trim() !== '').length;
+    record['主要項目取得数'] = String(majorCount);
+
+    const diagnosticKeys = new Set([
+      '取得ステータス','取得エラー理由','詳細取得ソース','_initialData有無','jobInfoWrapperModel有無','salaryInfoModel有無',
+      'semanticSegmentModels有無','JSON-LD JobPosting有無','oneGraphMatchComparison有無','主要項目取得数','全項目取得数','取得スキーマVersion'
+    ]);
+    record['全項目取得数'] = String(HEADERS.filter(k => !diagnosticKeys.has(k) && String(record[k] ?? '').trim() !== '').length);
+
+    if (majorCount >= 5) {
+      record['取得ステータス'] = 'OK';
+      record['取得エラー理由'] = '';
+    } else if (majorCount >= 2) {
+      record['取得ステータス'] = 'PARTIAL';
+      record['取得エラー理由'] = `major fields ${majorCount}/${majorFields.length}`;
+    } else {
+      record['取得ステータス'] = 'ERROR';
+      record['取得エラー理由'] = `major fields ${majorCount}/${majorFields.length}`;
+    }
+
+    return { record, source: record['取得ステータス'] === 'ERROR' ? 'error' : 'current-json' };
   }
 
   function isGoodRecord(record, source, elapsedMs = 0) {
     if (isChallengePage()) return false;
-
-    const title = record?.['ページタイトル'] || '';
-    const jobTitle = record?.['求人タイトル'] || '';
-    const jobKey = record?.['求人キー'] || '';
-
-    if (/just a moment/i.test(title)) return false;
-
-    if (source === 'json') {
-      return Boolean(jobTitle || jobKey);
-    }
-
-    if (source === 'dom-fallback') {
-      if (elapsedMs < 7000) return false;
-      return Boolean(jobTitle);
-    }
-
+    if (!record || source !== 'current-json') return false;
+    if (!record['求人キー'] || !record['求人タイトル']) return false;
+    if (record['取得ステータス'] === 'OK') return true;
+    if (record['取得ステータス'] === 'PARTIAL' && elapsedMs >= 5000) return true;
     return false;
   }
 
   function buildTsv(includeHeader) {
     const { record } = buildRecord();
-    const row = HEADERS.map(h => normalizeText(record[h]));
+    const row = HEADERS.map(h => toTsvCell(record[h]));
     if (includeHeader) {
       return `${HEADERS.join('\t')}\n${row.join('\t')}`;
     }
@@ -858,73 +1042,168 @@
     return 'other';
   }
 
+  function sanitizeSearchResultUrl(url) {
+    const norm = normalizeUrl(url);
+    if (!norm) return '';
+    try {
+      const u = new URL(norm);
+      if (/\/pagead\/|\/rc\/clk/i.test(u.pathname)) {
+        return `${u.origin}${u.pathname}`;
+      }
+      if (/\/viewjob/i.test(u.pathname)) {
+        const jk = u.searchParams.get('jk') || u.searchParams.get('vjk') || '';
+        return canonicalViewJobUrl(jk, norm) || `${u.origin}${u.pathname}`;
+      }
+      return `${u.origin}${u.pathname}${u.search}`;
+    } catch (e) {
+      return norm;
+    }
+  }
+
   function detectSearchSponsorMeta(anchorEl, cardEl, href) {
     const hrefText = String(href || '');
+    const classes = String(cardEl?.className || '');
     const cardText = normalizeText(cardEl?.textContent || anchorEl?.textContent || '');
+    const reasons = [];
 
-    if (/\/pagead\//i.test(hrefText)) {
+    if (/\/pagead\//i.test(hrefText)) reasons.push('link:/pagead/');
+    if (/\bsponTapItem\b/i.test(classes)) reasons.push('class:sponTapItem');
+    if (/\bmaybeSponsoredJob\b/i.test(classes)) reasons.push('class:maybeSponsoredJob');
+    if (/スポンサー|sponsored/i.test(cardText)) reasons.push('text:sponsored');
+
+    if (reasons.some(x => x === 'link:/pagead/' || x === 'class:sponTapItem')) {
       return {
         '検索結果スポンサー判定': 'true',
-        '検索結果スポンサー根拠': 'search-link-path:/pagead/'
+        '検索結果スポンサー根拠': reasons.join(ARRAY_SEP)
       };
     }
 
     if (/\/rc\/clk/i.test(hrefText)) {
       return {
         '検索結果スポンサー判定': 'false',
-        '検索結果スポンサー根拠': 'search-link-path:/rc/clk'
-      };
-    }
-
-    if (/スポンサー|sponsored/i.test(cardText)) {
-      return {
-        '検索結果スポンサー判定': 'true',
-        '検索結果スポンサー根拠': 'search-card-text:sponsored'
+        '検索結果スポンサー根拠': 'link:/rc/clk'
       };
     }
 
     return {
       '検索結果スポンサー判定': '',
-      '検索結果スポンサー根拠': 'search-link-path:unknown'
+      '検索結果スポンサー根拠': reasons.join(ARRAY_SEP)
     };
   }
 
   function deriveSearchMetaFromUrl(rawUrl) {
     const norm = normalizeUrl(rawUrl);
     if (!norm) return {};
-
     const linkType = getSearchLinkType(norm);
     const base = {
-      '検索結果元リンク': norm,
+      '検索結果元リンク': sanitizeSearchResultUrl(norm),
       '検索結果リンク種別': linkType,
       '検索結果スポンサー判定': '',
       '検索結果スポンサー根拠': ''
     };
-
     if (linkType === 'pagead') {
       base['検索結果スポンサー判定'] = 'true';
-      base['検索結果スポンサー根拠'] = 'input-url-path:/pagead/';
+      base['検索結果スポンサー根拠'] = 'input-url:/pagead/';
     } else if (linkType === 'rc/clk') {
       base['検索結果スポンサー判定'] = 'false';
-      base['検索結果スポンサー根拠'] = 'input-url-path:/rc/clk';
+      base['検索結果スポンサー根拠'] = 'input-url:/rc/clk';
     }
-
     return base;
   }
 
   function mergeSearchMeta(base, extra) {
     const out = Object.assign({}, base || {});
     const src = extra || {};
-
-    for (const key of ['検索結果元リンク', '検索結果リンク種別', '検索結果スポンサー判定', '検索結果スポンサー根拠']) {
-      if (src[key] !== undefined && src[key] !== null && String(src[key]) !== '') {
-        out[key] = String(src[key]);
-      } else if (out[key] === undefined) {
-        out[key] = '';
-      }
+    for (const [key, value] of Object.entries(src)) {
+      if (value !== undefined && value !== null && String(value) !== '') out[key] = value;
+      else if (!(key in out)) out[key] = '';
     }
-
     return out;
+  }
+
+  function getSearchInitialData() {
+    if (isObject(window._initialData)) return window._initialData;
+    const roots = getCandidateRoots();
+    return roots[0] || {};
+  }
+
+  function sanitizeSearchPageUrl(rawUrl) {
+    const norm = normalizeUrl(rawUrl);
+    if (!norm) return '';
+    try {
+      const u = new URL(norm);
+      for (const key of ['vjk','from','tk','mobtk','vjs']) u.searchParams.delete(key);
+      return u.href;
+    } catch (e) {
+      return norm;
+    }
+  }
+
+  function buildSearchPageMeta(crawlState = null) {
+    const root = getSearchInitialData();
+    const u = new URL(location.href);
+    const startValue = Number(u.searchParams.get('start') || 0);
+    const pageNumber = Number(root.pageNum || root.pageNumber || 0) || Math.floor(Math.max(0, startValue) / 10) + 1;
+    const related = Array.isArray(root.relatedQueries) ? root.relatedQueries.map(x => x?.query || '') : [];
+    const params = {};
+    u.searchParams.forEach((value, key) => {
+      if (['vjk','from','tk','mobtk','vjs'].includes(key)) return;
+      params[key] = value;
+    });
+
+    const state = crawlState || loadSearchCrawlState();
+    return {
+      '取得セッションID': state.sessionId || '',
+      'クロール開始日時': state.crawlStartedAt || state.createdAt || '',
+      '取得プロファイル': state.profileLabel || getProfileLabel(),
+      'ログイン状態': boolText(root.loggedIn ?? root.isLoggedIn),
+      '検索URL': sanitizeSearchPageUrl(location.href),
+      '検索キーワード': u.searchParams.get('q') || root.parsedQ || '',
+      '検索勤務地': u.searchParams.get('l') || root.parsedL || '',
+      '検索半径': u.searchParams.get('radius') || '',
+      '検索start値': String(Number.isFinite(startValue) ? startValue : 0),
+      '検索ページ番号': String(pageNumber),
+      '検索総件数': String(root.totalJobCount ?? root.resultsInfoModel?.totalNumResults ?? root.uniqueJobsCount ?? ''),
+      '関連検索候補': joinValues(related),
+      '検索条件JSON': safeJsonStringify(params)
+    };
+  }
+
+  function readPersistentText(key) {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const value = GM_getValue(key, '');
+        return typeof value === 'string' ? value : (value ? JSON.stringify(value) : '');
+      }
+    } catch (e) {}
+    try {
+      return localStorage.getItem(key) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function writePersistentText(key, text) {
+    const value = String(text ?? '');
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch (e) {}
+    localStorage.setItem(key, value);
+  }
+
+  function removePersistentValue(key) {
+    try {
+      if (typeof GM_deleteValue === 'function') {
+        GM_deleteValue(key);
+        return;
+      }
+    } catch (e) {}
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {}
   }
 
   function emptyBatchState() {
@@ -932,13 +1211,16 @@
       active: false,
       createdAt: '',
       updatedAt: '',
+      sessionId: '',
+      crawlStartedAt: '',
+      profileLabel: '',
       items: []
     };
   }
 
   function loadBatchState() {
     try {
-      const raw = localStorage.getItem(BATCH_STATE_KEY);
+      const raw = readPersistentText(BATCH_STATE_KEY);
       if (!raw) return emptyBatchState();
       const parsed = JSON.parse(raw);
       if (!parsed || !Array.isArray(parsed.items)) return emptyBatchState();
@@ -961,11 +1243,11 @@
 
   function saveBatchState(state) {
     state.updatedAt = nowText();
-    localStorage.setItem(BATCH_STATE_KEY, JSON.stringify(state));
+    writePersistentText(BATCH_STATE_KEY, JSON.stringify(state));
   }
 
   function clearBatchState() {
-    localStorage.removeItem(BATCH_STATE_KEY);
+    removePersistentValue(BATCH_STATE_KEY);
   }
 
   function emptySearchCrawlState() {
@@ -974,6 +1256,9 @@
       mode: 'collect-only',
       createdAt: '',
       updatedAt: '',
+      sessionId: '',
+      crawlStartedAt: '',
+      profileLabel: '',
       seedUrls: [],
       collectedItems: [],
       visitedPages: [],
@@ -983,7 +1268,7 @@
 
   function loadSearchCrawlState() {
     try {
-      const raw = localStorage.getItem(SEARCH_CRAWL_STATE_KEY);
+      const raw = readPersistentText(SEARCH_CRAWL_STATE_KEY);
       if (!raw) return emptySearchCrawlState();
       const parsed = JSON.parse(raw);
       if (!parsed) return emptySearchCrawlState();
@@ -1003,11 +1288,11 @@
 
   function saveSearchCrawlState(state) {
     state.updatedAt = nowText();
-    localStorage.setItem(SEARCH_CRAWL_STATE_KEY, JSON.stringify(state));
+    writePersistentText(SEARCH_CRAWL_STATE_KEY, JSON.stringify(state));
   }
 
   function clearSearchCrawlState() {
-    localStorage.removeItem(SEARCH_CRAWL_STATE_KEY);
+    removePersistentValue(SEARCH_CRAWL_STATE_KEY);
   }
 
   function normalizeUrl(url) {
@@ -1160,7 +1445,8 @@
     const c = getBatchCounts(state);
     infoEl.innerHTML =
       `状態: ${state.active ? '稼働中' : '停止中'}<br>` +
-      `件数: 全${c.total} / 完了${c.done} / 失敗${c.error} / 未処理${c.pending}`;
+      `件数: 全${c.total} / 完了${c.done} / 失敗${c.error} / 未処理${c.pending}<br>` +
+      `スキーマ: ${SCHEMA_VERSION}`;
 
     if (ta && !ta.dataset.userEdited) {
       if ((crawlState.collectedItems || []).length || (crawlState.seedUrls || []).length) {
@@ -1194,10 +1480,8 @@
   function applySearchMetaToRecord(record, searchMeta) {
     const out = Object.assign({}, record || {});
     const merged = mergeSearchMeta({}, searchMeta || {});
-    for (const key of ['検索結果元リンク', '検索結果リンク種別', '検索結果スポンサー判定', '検索結果スポンサー根拠']) {
-      if (HEADERS.includes(key)) {
-        out[key] = merged[key] || '';
-      }
+    for (const [key, value] of Object.entries(merged)) {
+      if (HEADERS.includes(key) && String(value ?? '') !== '') out[key] = value;
     }
     return out;
   }
@@ -1216,16 +1500,25 @@
     return true;
   }
 
-  function markCurrentAsError(message) {
+  function markCurrentAsError(message, diagnosticRecord = null, source = 'error') {
     const state = loadBatchState();
     const idx = findCurrentPendingIndex(state);
     if (idx < 0) return false;
 
+    const errorText = String(message || 'error');
+    let record = diagnosticRecord ? Object.assign({}, diagnosticRecord) : null;
+    if (record) {
+      record['取得ステータス'] = 'ERROR';
+      record['取得エラー理由'] = errorText;
+      record['詳細取得ソース'] = record['詳細取得ソース'] || source;
+      record = applySearchMetaToRecord(record, state.items[idx].searchMeta || {});
+    }
+
     state.items[idx].status = 'error';
-    state.items[idx].source = '';
-    state.items[idx].error = String(message || 'error');
+    state.items[idx].source = source;
+    state.items[idx].error = errorText;
     state.items[idx].processedAt = nowText();
-    state.items[idx].record = null;
+    state.items[idx].record = record;
     saveBatchState(state);
     return true;
   }
@@ -1233,8 +1526,8 @@
   function buildBatchTsv(includeHeader = true) {
     const state = loadBatchState();
     const rows = state.items
-      .filter(item => item.status === 'done' && item.record)
-      .map(item => HEADERS.map(h => normalizeText(item.record[h])));
+      .filter(item => item.record && (item.status === 'done' || item.status === 'error'))
+      .map(item => HEADERS.map(h => toTsvCell(item.record[h])));
 
     if (!rows.length) return '';
 
@@ -1352,10 +1645,23 @@
     const itemsFromText = buildItemsFromTextareaAndCollected(ta.value, crawlState.collectedItems || []);
 
     if (itemsFromText.length > 0) {
+      const startedAt = nowText();
+      const sessionId = makeSessionId();
+      const profileLabel = getProfileLabel();
+      itemsFromText.forEach(item => {
+        item.searchMeta = mergeSearchMeta({
+          '取得セッションID': sessionId,
+          'クロール開始日時': startedAt,
+          '取得プロファイル': profileLabel
+        }, item.searchMeta || {});
+      });
       const newState = {
         active: true,
-        createdAt: nowText(),
-        updatedAt: nowText(),
+        createdAt: startedAt,
+        updatedAt: startedAt,
+        sessionId,
+        crawlStartedAt: startedAt,
+        profileLabel,
         items: itemsFromText
       };
       saveBatchState(newState);
@@ -1381,7 +1687,12 @@
     const { partial = false, forceBatchStart = null } = options;
     const crawlState = loadSearchCrawlState();
 
-    const seedItems = (crawlState.seedUrls || []).map(url => makeItemFromUrl(url, {})).filter(Boolean);
+    const seedContext = {
+      '取得セッションID': crawlState.sessionId || '',
+      'クロール開始日時': crawlState.crawlStartedAt || crawlState.createdAt || '',
+      '取得プロファイル': crawlState.profileLabel || getProfileLabel()
+    };
+    const seedItems = (crawlState.seedUrls || []).map(url => makeItemFromUrl(url, seedContext)).filter(Boolean);
     const collectedItems = mergeItemArrays(crawlState.collectedItems || [], []);
     const items = mergeItemArrays(seedItems, collectedItems);
 
@@ -1391,8 +1702,11 @@
 
     const newBatchState = {
       active: shouldStartBatch,
-      createdAt: nowText(),
+      createdAt: crawlState.createdAt || nowText(),
       updatedAt: nowText(),
+      sessionId: crawlState.sessionId || '',
+      crawlStartedAt: crawlState.crawlStartedAt || crawlState.createdAt || '',
+      profileLabel: crawlState.profileLabel || '',
       items
     };
     saveBatchState(newBatchState);
@@ -1443,7 +1757,7 @@
   async function copyBatchResults() {
     const tsv = buildBatchTsv(true);
     if (!tsv) {
-      setBatchStatus('コピー対象の成功データがありません', true);
+      setBatchStatus('コピー対象の取得データがありません', true);
       return;
     }
     const ok = await copyText(tsv);
@@ -1458,7 +1772,7 @@
   function downloadBatchResults() {
     const tsv = buildBatchTsv(true);
     if (!tsv) {
-      setBatchStatus('ダウンロード対象の成功データがありません', true);
+      setBatchStatus('ダウンロード対象の取得データがありません', true);
       return;
     }
     downloadTextFile(filenameNow('indeed_batch', 'tsv'), tsv);
@@ -1530,59 +1844,103 @@
   }
 
   function getSearchResultCard(anchorEl) {
-    return anchorEl?.closest('[data-jk], .job_seen_beacon, .tapItem, li, [role="listitem"]') || null;
+    return anchorEl?.closest('.cardOutline.tapItem, .tapItem.result, li, .job_seen_beacon, [role="listitem"]') || null;
+  }
+
+  function isHiddenSearchCard(cardEl, anchorEl) {
+    if (!cardEl) return false;
+    if (cardEl.closest('[aria-hidden="true"], [hidden]')) return true;
+    if (anchorEl?.getAttribute('aria-hidden') === 'true') return true;
+    return false;
+  }
+
+  function cardText(cardEl, selector) {
+    const el = cardEl?.querySelector(selector);
+    return el ? normalizeText(el.textContent || '') : '';
+  }
+
+  function extractSearchCardFields(anchorEl, cardEl, position) {
+    const tags = Array.from(cardEl?.querySelectorAll('.jobsearch-JobCard-tag') || []).map(x => normalizeText(x.textContent || ''));
+    const metadata = Array.from(cardEl?.querySelectorAll('ul.metadataContainer li, .metadataContainer [data-testid*="attribute_snippet"]') || []);
+    const salaryEl = cardEl?.querySelector('.salary-snippet-container, [data-testid*="salary-snippet-container"]');
+    const salaryText = normalizeText(salaryEl?.textContent || '');
+    const employmentCandidates = metadata
+      .map(x => normalizeText(x.textContent || ''))
+      .filter(Boolean)
+      .filter(x => x !== salaryText);
+    const rating = cardText(cardEl, '[data-testid="holistic-rating"]');
+    const snippet = cardText(cardEl, '[data-testid="belowJobSnippet"], .job-snippet, [class*="job-snippet"]').slice(0, 1500);
+    const indeedApply = Boolean(cardEl?.querySelector('[data-testid="indeedApply"]'));
+    const responsiveEmployer = cardText(cardEl, '[data-testid="responsiveEmployer"]');
+
+    return {
+      'ページ内表示順': String(position),
+      '検索結果新着表示': boolText(Boolean(cardEl?.querySelector('[data-testid="new-job-tag"], .jobTitle-newJob'))),
+      '検索結果HiringEvent': boolText(anchorEl?.dataset?.hiringEvent === 'true'),
+      '検索時求人タイトル': normalizeText(anchorEl?.querySelector('[title]')?.getAttribute('title') || anchorEl?.textContent || ''),
+      '検索時会社名': cardText(cardEl, '[data-testid="company-name"]'),
+      '検索時勤務地': cardText(cardEl, '[data-testid="text-location"]'),
+      '検索時給与': salaryText,
+      '検索時雇用形態': employmentCandidates[0] || '',
+      '検索時タグ': joinValues(tags),
+      '検索時スニペット': snippet,
+      '検索時会社評価': rating,
+      '検索カード属性JSON': safeJsonStringify({
+        dataCi: anchorEl?.dataset?.ci || '',
+        dataEmpn: anchorEl?.dataset?.empn || '',
+        hiringEvent: anchorEl?.dataset?.hiringEvent || '',
+        indeedApply,
+        responsiveEmployer
+      })
+    };
   }
 
   function collectSearchResultEntries() {
     const map = new Map();
+    const pageMeta = buildSearchPageMeta();
+    const nextUrl = findNextSearchPageUrl();
+    let position = 0;
 
-    function addCandidate(anchorEl, href, jk = '') {
+    function addCandidate(anchorEl, href, jk = '', countPosition = true) {
+      if (!anchorEl) return;
+      const cardEl = getSearchResultCard(anchorEl);
+      if (isHiddenSearchCard(cardEl, anchorEl)) return;
+
       const rawHref = normalizeUrl(href);
-      if (!rawHref) return;
-      if (!/^https:\/\/jp\.indeed\.com\//i.test(rawHref)) return;
+      if (!rawHref || !/^https:\/\/jp\.indeed\.com\//i.test(rawHref)) return;
 
       const jobKey = String(jk || getAnchorJobKey(anchorEl) || getJobKeyFromUrl(rawHref) || '').trim();
+      if (!jobKey) return;
       const canonicalUrl = canonicalViewJobUrl(jobKey, rawHref);
       if (!canonicalUrl) return;
 
-      const cardEl = getSearchResultCard(anchorEl);
-      const searchMeta = mergeSearchMeta(
-        {
-          '検索結果元リンク': rawHref,
-          '検索結果リンク種別': getSearchLinkType(rawHref),
-          '検索結果スポンサー判定': '',
-          '検索結果スポンサー根拠': ''
-        },
-        detectSearchSponsorMeta(anchorEl, cardEl, rawHref)
-      );
+      const key = entryKeyFromUrl(canonicalUrl);
+      if (map.has(key)) return;
+
+      if (countPosition) position += 1;
+      const sponsorMeta = detectSearchSponsorMeta(anchorEl, cardEl, rawHref);
+      const searchMeta = mergeSearchMeta(pageMeta, {
+        '検索結果元リンク': sanitizeSearchResultUrl(rawHref),
+        '検索結果リンク種別': getSearchLinkType(rawHref),
+        ...sponsorMeta,
+        ...extractSearchCardFields(anchorEl, cardEl, position || map.size + 1),
+        '次ページURL': sanitizeSearchPageUrl(nextUrl)
+      });
 
       const item = makeItemFromUrl(canonicalUrl, searchMeta);
-      if (!item) return;
-
-      if (!map.has(item.urlKey)) {
-        map.set(item.urlKey, item);
-      } else {
-        const prev = map.get(item.urlKey);
-        prev.searchMeta = mergeSearchMeta(prev.searchMeta, item.searchMeta);
-        map.set(item.urlKey, prev);
-      }
+      if (item) map.set(item.urlKey, item);
     }
 
-    document.querySelectorAll('[data-jk]').forEach(el => {
-      const jk = (el.getAttribute('data-jk') || '').trim();
-      if (!jk) return;
-      const a = el.matches('a[href]') ? el : el.querySelector('a[href]');
-      addCandidate(a, a ? a.href : '', jk);
-    });
+    const primaryAnchors = Array.from(document.querySelectorAll('a[data-jk][href], [data-jk] a[href*="/viewjob"], [data-jk] a[href*="/pagead/"], [data-jk] a[href*="/rc/clk"], h2 a[href*="/viewjob"], h3 a[href*="/viewjob"], h2 a[href*="/pagead/"], h3 a[href*="/pagead/"]'));
+    for (const a of primaryAnchors) {
+      addCandidate(a, a.href, a.getAttribute('data-jk') || '', true);
+    }
 
-    document.querySelectorAll('a[href*="/viewjob?"], a[href*="/rc/clk"], a[href*="/pagead/"]').forEach(a => {
-      addCandidate(a, a.href, '');
-    });
-
-    document.querySelectorAll('h2 a[href], [data-testid="jobTitle"] a[href], a[data-jk][href]').forEach(a => {
-      const jk = (a.getAttribute('data-jk') || '').trim();
-      addCandidate(a, a.href, jk);
-    });
+    if (!map.size) {
+      document.querySelectorAll('a[href*="/viewjob?"], a[href*="/rc/clk"], a[href*="/pagead/"]').forEach(a => {
+        addCandidate(a, a.href, '', true);
+      });
+    }
 
     return Array.from(map.values());
   }
@@ -1712,15 +2070,17 @@
 
     const ta = document.querySelector(`#${PANEL_ID} textarea`);
     const seedUrls = parseUrlLines(ta ? ta.value : '').map(x => x.inputUrl);
-    const prevState = loadSearchCrawlState();
-
+    const startedAt = nowText();
     const state = {
       active: true,
       mode: mode,
-      createdAt: nowText(),
-      updatedAt: nowText(),
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      sessionId: makeSessionId(),
+      crawlStartedAt: startedAt,
+      profileLabel: getProfileLabel(),
       seedUrls: uniqueNormalizedUrls(seedUrls),
-      collectedItems: prevState.collectedItems || [],
+      collectedItems: [],
       visitedPages: [],
       pageCount: 0
     };
@@ -1737,19 +2097,22 @@
 
   async function waitForStableRecord(timeoutMs = 30000, intervalMs = 1000) {
     const start = Date.now();
+    let lastResult = null;
 
     while (Date.now() - start < timeoutMs) {
-      const result = buildRecord();
+      lastResult = buildRecord();
       const elapsed = Date.now() - start;
 
-      if (isGoodRecord(result.record, result.source, elapsed)) {
-        return result;
+      if (isGoodRecord(lastResult.record, lastResult.source, elapsed)) {
+        return lastResult;
       }
 
       await sleep(intervalMs);
     }
 
-    throw new Error('求人データ取得タイムアウト');
+    const error = new Error('求人データ取得タイムアウト');
+    error.lastResult = lastResult;
+    throw error;
   }
 
   async function autoRunBatchIfNeeded() {
@@ -1781,7 +2144,10 @@
       goToNextPending();
     } catch (err) {
       console.error(err);
-      markCurrentAsError(err.message || String(err));
+      const diagnosticRecord = err?.lastResult?.record || (() => {
+        try { return buildRecord().record; } catch (e) { return null; }
+      })();
+      markCurrentAsError(err.message || String(err), diagnosticRecord, err?.lastResult?.source || 'error');
       refreshBatchInfo();
       setBatchStatus(`取得失敗: ${err.message || err}`, true);
 
@@ -1863,7 +2229,13 @@
       const { record, source } = await waitForStableRecord(15000, 500);
       const jobKey = record['求人キー'] || getJobKeyFromUrl(location.href) || '';
       const canonicalUrl = canonicalViewJobUrl(jobKey, location.href) || normalizeUrl(location.href);
-      const searchMeta = deriveSearchMetaFromUrl(canonicalUrl);
+      const startedAt = nowText();
+      const sessionId = makeSessionId();
+      const searchMeta = mergeSearchMeta({
+        '取得セッションID': sessionId,
+        'クロール開始日時': startedAt,
+        '取得プロファイル': getProfileLabel()
+      }, deriveSearchMetaFromUrl(canonicalUrl));
       const savedRecord = applySearchMetaToRecord(record, searchMeta);
 
       const item = {
@@ -1880,8 +2252,11 @@
 
       const newState = {
         active: false,
-        createdAt: nowText(),
+        createdAt: startedAt,
         updatedAt: nowText(),
+        sessionId,
+        crawlStartedAt: startedAt,
+        profileLabel: getProfileLabel(),
         items: [item]
       };
 
@@ -2146,6 +2521,16 @@
         font-size: 12px;
         line-height: 1.4;
       }
+      #${PANEL_ID} .tm-profile-input {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        padding: 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        background: #fff;
+      }
       #${PANEL_ID} .tm-sub {
         margin-top: 7px;
         font-size: 11px;
@@ -2259,6 +2644,12 @@
         </div>
 
         <div class="tm-group">
+          <div class="tm-label">取得プロファイル（任意）</div>
+          <input class="tm-profile-input" type="text" placeholder="例: browser_A / driver_history / logged_out" />
+          <div class="tm-sub">検索履歴・ログイン状態の比較用ラベルです。メールアドレス等の個人情報は入れず、任意の実験名だけを設定してください。</div>
+        </div>
+
+        <div class="tm-group">
           <div class="tm-label">手動URL一覧（1行1件）</div>
           <textarea placeholder="https://jp.indeed.com/viewjob?jk=...\nhttps://jp.indeed.com/viewjob?jk=..."></textarea>
           <div class="tm-buttons" style="margin-top:8px;">
@@ -2301,6 +2692,13 @@
     panel.querySelector('.btn-batch-download').addEventListener('click', () => downloadBatchResults());
     panel.querySelector('.btn-error-copy').addEventListener('click', () => copyErrorUrls());
 
+    const profileInput = panel.querySelector('.tm-profile-input');
+    if (profileInput) {
+      profileInput.value = getProfileLabel();
+      profileInput.addEventListener('change', () => setProfileLabel(profileInput.value));
+      profileInput.addEventListener('blur', () => setProfileLabel(profileInput.value));
+    }
+
     const ta = panel.querySelector('textarea');
     ta.addEventListener('input', () => {
       ta.dataset.userEdited = '1';
@@ -2327,11 +2725,10 @@
 
       const { record, source } = buildRecord();
       const title = record['求人タイトル'] || '(タイトル未取得)';
-
-      if (source === 'json') {
-        setStatus(`データ検出OK(JSON): ${title}`);
+      if (source === 'current-json') {
+        setStatus(`${record['取得ステータス']} / 現行JSON: ${title}`);
       } else {
-        setStatus(`データ検出OK(DOM簡易): ${title}`);
+        setStatus(`求人詳細モデル未検出: ${record['取得エラー理由'] || title}`, true);
       }
     } catch (err) {
       setStatus(`求人データ待機中: ${err.message || err}`, true);
@@ -2368,6 +2765,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export: loaded');
+  console.log('Indeed Helper Batch Export v2.0.0: loaded');
 })();
 
