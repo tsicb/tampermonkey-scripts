@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.0.1
+// @version      2.0.2
 // @description  現行Indeedの検索結果・求人詳細・Indeed解釈・ユーザー文脈を単発/一括でTSV出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -18,11 +18,11 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v2';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v2';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v3';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v3';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v2';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v3';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -62,7 +62,7 @@
     '検索時スニペット',
     '検索時会社評価',
     '検索カード属性JSON',
-    '詳細ページスポンサー判定',
+    '詳細HTML sponsored(raw)',
     'requestPath',
     '求人キー',
     '求人タイトル',
@@ -146,6 +146,7 @@
     '待遇福利厚生',
     '社会保険',
     '職場環境',
+    'PR・アピール情報',
     '応募方法',
     '選考プロセス',
     'その他',
@@ -691,7 +692,7 @@
     const knownLabels = new Set([
       'job-description','qualification','work-hours','working-system','holidays','full-address','work-location',
       'commute-info','pay','salary-example','probation-conditions','benefits','social-insurance','work-environment',
-      'apply-method','apply-info','other','company-name','company-location','company-industry','company-president','contact-tel'
+      'employer-message','apply-method','apply-info','other','company-name','company-location','company-industry','company-president','contact-tel'
     ]);
     const labels = [];
     const unknown = [];
@@ -717,6 +718,46 @@
       if (map[key]) return map[key];
     }
     return '';
+  }
+
+  function collectSemanticLabelText(bundle, semanticLabel) {
+    const parts = [];
+    for (const seg of getSemanticSegments(bundle)) {
+      if ((seg?.semanticLabel || '') !== semanticLabel) continue;
+      const header = normalizeText(seg?.header || '');
+      const content = stripHtml(seg?.sanitizedContent || seg?.content || '');
+      if (!content) continue;
+      parts.push(header ? `【${header}】\n${content}` : content);
+    }
+    return parts.join('\n\n');
+  }
+
+  function normalizeSalaryBound(value) {
+    if (value === null || value === undefined || value === '') return '';
+    const n = Number(value);
+    if (Number.isFinite(n) && n < 0) return '';
+    return value;
+  }
+
+  function normalizeJapaneseLocality(locality, region) {
+    let loc = normalizeText(locality || '');
+    const reg = normalizeText(region || '');
+    if (!loc || !reg) return loc;
+
+    const prefixes = [reg];
+    const core = reg === '北海道' ? '北海道' : reg.replace(/[都府県]$/, '');
+    if (core && core !== reg) prefixes.push(core);
+
+    for (const prefix of prefixes.sort((a, b) => b.length - a.length)) {
+      if (!prefix || !loc.startsWith(prefix) || loc.length <= prefix.length) continue;
+      const rest = loc.slice(prefix.length).trim();
+      // 京都市 / 大阪市のように都道府県名と市名が同じケースは削り過ぎない。
+      if (rest.length >= 2 && /.+[市区町村郡]/.test(rest)) {
+        loc = rest;
+        break;
+      }
+    }
+    return loc;
   }
 
   function getDomText(selectors) {
@@ -844,7 +885,7 @@
 
     record['ログイン状態'] = boolText(body.loggedIn ?? root.loggedIn ?? body.saveJobButtonContainerModel?.isLoggedIn);
     record['canonical URL'] = getCanonicalUrl(bundle.jobKey);
-    record['詳細ページスポンサー判定'] = boolText(body.sponsored ?? root.sponsored);
+    record['詳細HTML sponsored(raw)'] = boolText(body.sponsored ?? root.sponsored);
     record['requestPath'] = sanitizeRequestPath(body.requestPath || root.requestPath || '', bundle.jobKey);
     record['求人キー'] = bundle.jobKey || '';
     record['求人タイトル'] = bundle.jobTitle || '';
@@ -873,7 +914,7 @@
     record['勤務地完全住所'] = semanticFullAddress || address.streetAddress || '';
     record['郵便番号'] = address.postalCode || '';
     record['都道府県'] = address.addressRegion || '';
-    record['市区町村相当'] = address.addressLocality || '';
+    record['市区町村相当'] = normalizeJapaneseLocality(address.addressLocality || '', address.addressRegion || '');
     record['streetAddress'] = address.streetAddress || '';
     record['国コード'] = address.addressCountry || body.jobCountry || '';
     record['緯度'] = geo.latitude ?? address.latitude ?? ldLocation.latitude ?? '';
@@ -882,8 +923,8 @@
     record['交通アクセス'] = pickSegment(segMap, ['交通・アクセス', 'label:commute-info']);
 
     record['給与テキスト'] = salary.salaryText || '';
-    record['給与最小'] = salary.salaryMin ?? ldSalaryValue.minValue ?? ldSalaryValue.value ?? '';
-    record['給与最大'] = salary.salaryMax ?? ldSalaryValue.maxValue ?? ldSalaryValue.value ?? '';
+    record['給与最小'] = normalizeSalaryBound(salary.salaryMin ?? ldSalaryValue.minValue ?? ldSalaryValue.value ?? '');
+    record['給与最大'] = normalizeSalaryBound(salary.salaryMax ?? ldSalaryValue.maxValue ?? ldSalaryValue.value ?? '');
     record['給与通貨'] = salary.salaryCurrency || ldSalary.currency || '';
     record['給与種別'] = salary.salaryType || ldSalaryValue.unitText || '';
     record['給与ソース'] = salary.salarySource || '';
@@ -955,6 +996,7 @@
     record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', 'label:benefits']);
     record['社会保険'] = pickSegment(segMap, ['社会保険', 'label:social-insurance']);
     record['職場環境'] = pickSegment(segMap, ['職場環境', 'label:work-environment']);
+    record['PR・アピール情報'] = collectSemanticLabelText(bundle, 'employer-message');
     record['応募方法'] = pickSegment(segMap, ['応募方法', 'label:apply-method']);
     record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', 'label:apply-info']);
     record['その他'] = pickSegment(segMap, ['その他', 'label:other']);
@@ -1416,7 +1458,10 @@
       error: '',
       processedAt: '',
       record: null,
-      searchMeta: mergeSearchMeta(deriveSearchMetaFromUrl(norm), searchMeta || {})
+      searchMeta: mergeSearchMeta(
+        /\/(?:pagead|rc\/clk)/i.test(new URL(norm).pathname) ? deriveSearchMetaFromUrl(norm) : {},
+        searchMeta || {}
+      )
     };
   }
 
@@ -1674,8 +1719,11 @@
 
     const {
       forceFromTextarea = false,
-      preferExistingProgress = true
+      preferExistingProgress = true,
+      freshSession = false
     } = options || {};
+
+    if (freshSession) clearSearchCrawlState();
 
     const state = loadBatchState();
     const counts = getBatchCounts(state);
@@ -1719,6 +1767,11 @@
       refreshBatchInfo();
       setBatchStatus('URL一覧から一括処理を開始します');
       goToNextPending();
+      return;
+    }
+
+    if (freshSession) {
+      setBatchStatus('手動URL一覧が空です。前回結果は変更していません', true);
       return;
     }
 
@@ -2061,10 +2114,10 @@
 
   function appendSearchResultUrlsToTextarea() {
     const ta = document.querySelector(`#${PANEL_ID} textarea`);
-    if (!ta) return { added: 0, totalFound: 0 };
+    if (!ta) return { added: 0, totalFound: 0, entries: [] };
 
     const entries = collectSearchResultEntries();
-    if (!entries.length) return { added: 0, totalFound: 0 };
+    if (!entries.length) return { added: 0, totalFound: 0, entries: [] };
 
     const beforeItems = parseUrlLines(ta.value);
     const beforeKeys = new Set(beforeItems.map(x => x.urlKey));
@@ -2077,7 +2130,42 @@
     const afterItems = parseUrlLines(ta.value);
     const added = afterItems.filter(x => !beforeKeys.has(x.urlKey)).length;
 
-    return { added, totalFound: entries.length };
+    return { added, totalFound: entries.length, entries };
+  }
+
+  function addEntriesToExistingBatch(entries) {
+    const sourceEntries = Array.isArray(entries) ? entries : [];
+    if (!sourceEntries.length) return { added: 0, pending: 0 };
+
+    const state = loadBatchState();
+    const startedAt = state.crawlStartedAt || state.createdAt || nowText();
+    const sessionId = state.sessionId || makeSessionId();
+    const profileLabel = state.profileLabel || getProfileLabel();
+    const existingKeys = new Set((state.items || []).map(item => item.urlKey).filter(Boolean));
+    let added = 0;
+
+    if (!Array.isArray(state.items)) state.items = [];
+
+    for (const src of sourceEntries) {
+      const item = makeItemFromUrl(src?.inputUrl || src?.url || '', mergeSearchMeta({
+        '取得セッションID': sessionId,
+        'クロール開始日時': startedAt,
+        '取得プロファイル': profileLabel
+      }, src?.searchMeta || {}));
+      if (!item || existingKeys.has(item.urlKey)) continue;
+      state.items.push(item);
+      existingKeys.add(item.urlKey);
+      added += 1;
+    }
+
+    state.sessionId = sessionId;
+    state.crawlStartedAt = startedAt;
+    state.createdAt = state.createdAt || startedAt;
+    state.profileLabel = profileLabel;
+    state.active = state.items.some(item => item.status === 'pending');
+    saveBatchState(state);
+
+    return { added, pending: getBatchCounts(state).pending };
   }
 
   function collectResultsOnly() {
@@ -2103,24 +2191,49 @@
       return;
     }
 
-    const { added, totalFound } = appendSearchResultUrlsToTextarea();
+    const { added, totalFound, entries } = appendSearchResultUrlsToTextarea();
     if (!totalFound) {
       setSearchStatus('このページで求人リンクを検出できませんでした', true);
       return;
     }
 
-    setSearchStatus(`このページから ${totalFound}件検出 / ${added}件追加。これから開始します`);
-    startOrResumeBatch({ forceFromTextarea: true });
+    const batchAdd = addEntriesToExistingBatch(entries);
+    refreshBatchInfo();
+    refreshSearchInfo();
+
+    if (!batchAdd.added) {
+      setSearchStatus(`このページから ${totalFound}件検出しましたが、すべて取得済みです`);
+      setBatchStatus('追加取得する新しい求人はありません');
+      return;
+    }
+
+    setSearchStatus(`このページから ${totalFound}件検出 / URL一覧へ${added}件追加 / 未取得${batchAdd.added}件を追加取得します`);
+    setBatchStatus(`追加取得を開始します（新規${batchAdd.added}件）`);
+    goToNextPending();
   }
 
-  function startFullSearchCrawl(mode) {
+  function startFullSearchCrawl(mode, options = {}) {
     if (!isSearchResultsPage()) {
       setSearchStatus('検索結果ページで実行してください', true);
       return;
     }
 
+    const { fresh = false } = options || {};
     const ta = document.querySelector(`#${PANEL_ID} textarea`);
-    const seedUrls = parseUrlLines(ta ? ta.value : '').map(x => x.inputUrl);
+
+    if (fresh) {
+      clearBatchState();
+      clearSearchCrawlState();
+      if (ta) {
+        ta.value = '';
+        ta.dataset.userEdited = '';
+      }
+      refreshBatchInfo();
+      refreshSearchInfo();
+      setBatchStatus('前回の取得結果をクリアし、新規取得を開始します');
+    }
+
+    const seedUrls = fresh ? [] : parseUrlLines(ta ? ta.value : '').map(x => x.inputUrl);
     const startedAt = nowText();
     const state = {
       active: true,
@@ -2140,7 +2253,7 @@
     refreshSearchInfo();
     refreshBatchInfo();
     setSearchStatus(mode === 'collect-and-start'
-      ? '全ページ収集を開始します。収集後に一括取得も始めます'
+      ? (fresh ? '新規取得として全ページ収集を開始します。前回結果はクリア済みです' : '全ページ収集を開始します。収集後に一括取得も始めます')
       : '全ページ収集を開始します');
 
     autoRunSearchCrawlIfNeeded();
@@ -2653,7 +2766,7 @@
         <div class="tm-label">通常操作</div>
         <div class="tm-buttons">
           <button class="btn-single-save tm-primary">表示中の求人を取得</button>
-          <button class="btn-collect-all-start tm-primary">検索結果すべての求人を取得</button>
+          <button class="btn-collect-all-start tm-primary">新規取得：検索結果すべて</button>
           <button class="btn-batch-copy">取得データをTSVコピー</button>
         </div>
 
@@ -2685,7 +2798,7 @@
           <div class="tm-label">検索結果ページの詳細操作</div>
           <div class="tm-buttons-2">
             <button class="btn-collect-results">現ページだけURL追加</button>
-            <button class="btn-collect-start">現ページを追加して取得開始</button>
+            <button class="btn-collect-start">現ページを追加取得</button>
           </div>
           <div class="tm-buttons" style="margin-top:8px;">
             <button class="btn-collect-all tm-muted">全ページURL収集のみ</button>
@@ -2704,7 +2817,7 @@
           <div class="tm-label">手動URL一覧（1行1件）</div>
           <textarea placeholder="https://jp.indeed.com/viewjob?jk=...\nhttps://jp.indeed.com/viewjob?jk=..."></textarea>
           <div class="tm-buttons" style="margin-top:8px;">
-            <button class="btn-batch-start">手動URL一覧から取得開始/再開</button>
+            <button class="btn-batch-start">手動URL一覧から新規取得</button>
           </div>
         </div>
 
@@ -2714,7 +2827,7 @@
             <button class="btn-batch-download">TSVファイルDL</button>
             <button class="btn-error-copy">失敗URLコピー</button>
           </div>
-          <div class="tm-sub">通常は「取得データをTSVコピー」だけでスプレッドシートに貼り付けできます。</div>
+          <div class="tm-sub">「新規取得」は前回結果を自動クリアします。「追加取得」は既存結果を残して新しいURLだけ取得します。</div>
         </div>
       </details>
       </div>
@@ -2726,7 +2839,7 @@
     applyPanelCollapsedState(loadPanelCollapsed());
 
     panel.querySelector('.btn-single-save').addEventListener('click', () => saveCurrentJobAsSingleResult());
-    panel.querySelector('.btn-collect-all-start').addEventListener('click', () => startFullSearchCrawl('collect-and-start'));
+    panel.querySelector('.btn-collect-all-start').addEventListener('click', () => startFullSearchCrawl('collect-and-start', { fresh: true }));
     panel.querySelector('.btn-batch-copy').addEventListener('click', () => copyBatchResults());
     panel.querySelector('.btn-toggle-run').addEventListener('click', () => toggleRunPause());
     panel.querySelector('.btn-batch-clear').addEventListener('click', () => clearBatchResults());
@@ -2739,7 +2852,7 @@
     panel.querySelector('.btn-collect-start').addEventListener('click', () => collectResultsAndStart());
     panel.querySelector('.btn-collect-all').addEventListener('click', () => startFullSearchCrawl('collect-only'));
 
-    panel.querySelector('.btn-batch-start').addEventListener('click', () => startOrResumeBatch({ forceFromTextarea: true }));
+    panel.querySelector('.btn-batch-start').addEventListener('click', () => startOrResumeBatch({ forceFromTextarea: true, preferExistingProgress: false, freshSession: true }));
     panel.querySelector('.btn-batch-download').addEventListener('click', () => downloadBatchResults());
     panel.querySelector('.btn-error-copy').addEventListener('click', () => copyErrorUrls());
 
