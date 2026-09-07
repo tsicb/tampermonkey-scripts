@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.0.2
+// @version      2.0.3
 // @description  現行Indeedの検索結果・求人詳細・Indeed解釈・ユーザー文脈を単発/一括でTSV出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -18,11 +18,11 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v3';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v3';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v4';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v4';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v3';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v4';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -49,7 +49,7 @@
     'ページ内表示順',
     '検索結果元リンク',
     '検索結果リンク種別',
-    '検索結果スポンサー判定',
+    '検索結果スポンサー明示',
     '検索結果スポンサー根拠',
     '検索結果新着表示',
     '検索結果HiringEvent',
@@ -61,6 +61,7 @@
     '検索時タグ',
     '検索時スニペット',
     '検索時会社評価',
+    '検索時返信率の高い企業表示',
     '検索カード属性JSON',
     '詳細HTML sponsored(raw)',
     'requestPath',
@@ -1154,33 +1155,36 @@
   }
 
   function detectSearchSponsorMeta(anchorEl, cardEl, href) {
-    const hrefText = String(href || '');
-    const classes = String(cardEl?.className || '');
-    const cardText = normalizeText(cardEl?.textContent || anchorEl?.textContent || '');
-    const reasons = [];
+    // 現行Indeedでは /pagead/ や sponTapItem がスポンサー専用とは限らないため、
+    // URL/クラスだけではスポンサー判定しない。画面上の明示表示だけを true とする。
+    const explicitReasons = [];
 
-    if (/\/pagead\//i.test(hrefText)) reasons.push('link:/pagead/');
-    if (/\bsponTapItem\b/i.test(classes)) reasons.push('class:sponTapItem');
-    if (/\bmaybeSponsoredJob\b/i.test(classes)) reasons.push('class:maybeSponsoredJob');
-    if (/スポンサー|sponsored/i.test(cardText)) reasons.push('text:sponsored');
+    const candidateEls = [
+      cardEl?.querySelector('[data-testid*="sponsor" i]'),
+      cardEl?.querySelector('[aria-label*="スポンサー"], [aria-label*="sponsored" i]'),
+      cardEl?.querySelector('[class*="sponsor" i]')
+    ].filter(Boolean);
 
-    if (reasons.some(x => x === 'link:/pagead/' || x === 'class:sponTapItem')) {
-      return {
-        '検索結果スポンサー判定': 'true',
-        '検索結果スポンサー根拠': reasons.join(ARRAY_SEP)
-      };
+    for (const el of candidateEls) {
+      const text = normalizeText(`${el.getAttribute?.('aria-label') || ''} ${el.textContent || ''}`);
+      if (/スポンサー|sponsored/i.test(text)) {
+        explicitReasons.push('visible-label:sponsored');
+        break;
+      }
     }
 
-    if (/\/rc\/clk/i.test(hrefText)) {
-      return {
-        '検索結果スポンサー判定': 'false',
-        '検索結果スポンサー根拠': 'link:/rc/clk'
-      };
+    if (!explicitReasons.length) {
+      const textNodes = Array.from(cardEl?.querySelectorAll('span, div') || []);
+      const found = textNodes.some(el => {
+        const text = normalizeText(el.textContent || '');
+        return /^(スポンサー|Sponsored)$/i.test(text);
+      });
+      if (found) explicitReasons.push('visible-text:sponsored');
     }
 
     return {
-      '検索結果スポンサー判定': '',
-      '検索結果スポンサー根拠': reasons.join(ARRAY_SEP)
+      '検索結果スポンサー明示': explicitReasons.length ? 'true' : '',
+      '検索結果スポンサー根拠': explicitReasons.join(ARRAY_SEP)
     };
   }
 
@@ -1191,16 +1195,9 @@
     const base = {
       '検索結果元リンク': sanitizeSearchResultUrl(norm),
       '検索結果リンク種別': linkType,
-      '検索結果スポンサー判定': '',
+      '検索結果スポンサー明示': '',
       '検索結果スポンサー根拠': ''
     };
-    if (linkType === 'pagead') {
-      base['検索結果スポンサー判定'] = 'true';
-      base['検索結果スポンサー根拠'] = 'input-url:/pagead/';
-    } else if (linkType === 'rc/clk') {
-      base['検索結果スポンサー判定'] = 'false';
-      base['検索結果スポンサー根拠'] = 'input-url:/rc/clk';
-    }
     return base;
   }
 
@@ -1989,6 +1986,7 @@
       '検索時タグ': joinValues(tags),
       '検索時スニペット': snippet,
       '検索時会社評価': rating,
+      '検索時返信率の高い企業表示': responsiveEmployer,
       '検索カード属性JSON': safeJsonStringify({
         dataCi: anchorEl?.dataset?.ci || '',
         dataEmpn: anchorEl?.dataset?.empn || '',
@@ -2881,9 +2879,9 @@
       if (isSearchResultsPage() && !location.pathname.includes('/viewjob')) {
         const entries = collectSearchResultEntries();
         const nextUrl = findNextSearchPageUrl();
-        const sponsored = entries.filter(x => x.searchMeta?.['検索結果スポンサー判定'] === 'true').length;
-        const organic = entries.filter(x => x.searchMeta?.['検索結果スポンサー判定'] === 'false').length;
-        setStatus(`検索結果ページ: 求人リンク ${entries.length}件 / スポンサー ${sponsored} / オーガニック ${organic} / 次ページ ${nextUrl ? 'あり' : 'なし'}`);
+        const sponsoredExplicit = entries.filter(x => x.searchMeta?.['検索結果スポンサー明示'] === 'true').length;
+        const sponsorUnknown = entries.length - sponsoredExplicit;
+        setStatus(`検索結果ページ: 求人リンク ${entries.length}件 / スポンサー明示 ${sponsoredExplicit} / 未判定 ${sponsorUnknown} / 次ページ ${nextUrl ? 'あり' : 'なし'}`);
         return;
       }
 
