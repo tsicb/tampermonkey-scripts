@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.0.3
-// @description  現行Indeedの検索結果・求人詳細・Indeed解釈・ユーザー文脈を単発/一括でTSV出力
+// @version      2.1.0
+// @description  現行Indeedの検索結果・求人詳細・Indeed解釈を取得し、フルTSVと検索表示分析TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
 // @grant        GM_getValue
@@ -186,6 +186,72 @@
     '主要項目取得数',
     '全項目取得数',
     '取得スキーマVersion'
+  ];
+
+  // フルTSVとは別に、検索語と表示求人の関係を確認しやすい分析ビューを出力する。
+  // マスターの取得項目は減らさず、ここでは必要列＋派生列だけを投影する。
+  const SEARCH_DISPLAY_ANALYSIS_HEADERS = [
+    '取得セッションID',
+    '検索キーワード',
+    '検索勤務地',
+    '検索ページ番号',
+    'ページ内表示順',
+    '検索内通し順位（観測）',
+    '求人キー',
+    '求人タイトル',
+    '会社名',
+    '勤務地表示',
+    '雇用形態表示',
+    '給与テキスト',
+    '掲載日時',
+    '掲載経過表示',
+    '検索結果新着表示',
+    '検索結果スポンサー明示',
+    '検索時返信率の高い企業表示',
+    '検索時タグ',
+    'Indeed職種分類名一覧',
+    'Indeed抽出属性名一覧',
+    'Indeed表示タグ',
+    'Indeed関連検索what',
+    '仕事内容',
+    '求めている人材',
+    'PR・アピール情報',
+    '検索語一致タイプ',
+    'タイトル検索語一致',
+    '仕事内容検索語一致',
+    '求めている人材検索語一致',
+    'PR検索語一致',
+    '本文全文検索語一致',
+    'Indeed職種分類検索語一致',
+    'Indeed抽出属性検索語一致',
+    'Indeed表示タグ検索語一致',
+    'Indeed関連検索what検索語一致',
+    '検索時タグ検索語一致',
+    '全文検索語出現回数',
+    '全体トークン一致率'
+  ];
+
+  const SEARCH_MATCH_ANALYSIS_HEADERS = [
+    '検索キーワード',
+    '検索勤務地',
+    '検索内通し順位（観測）',
+    '検索ページ番号',
+    'ページ内表示順',
+    '求人キー',
+    '求人タイトル',
+    '会社名',
+    '検索語一致タイプ',
+    'タイトル検索語一致',
+    '本文全文検索語一致',
+    'Indeed職種分類検索語一致',
+    'Indeed抽出属性検索語一致',
+    'Indeed表示タグ検索語一致',
+    'Indeed関連検索what検索語一致',
+    '検索時タグ検索語一致',
+    '全文検索語出現回数',
+    '全体トークン一致率',
+    'Indeed職種分類名一覧',
+    'Indeed抽出属性名一覧'
   ];
 
   function isObject(v) {
@@ -1628,6 +1694,175 @@
     return includeHeader ? `${HEADERS.join('\t')}\n${lines.join('\n')}` : lines.join('\n');
   }
 
+  function normalizeForSearchMatch(value) {
+    let text = String(value ?? '');
+    try { text = text.normalize('NFKC'); } catch (e) {}
+    return text.toLowerCase().replace(/[\u3000\s]+/g, ' ').trim();
+  }
+
+  function compactForSearchMatch(value) {
+    return normalizeForSearchMatch(value).replace(/\s+/g, '');
+  }
+
+  function containsSearchQuery(text, query) {
+    const q = normalizeForSearchMatch(query).replace(/^["'「『]+|["'」』]+$/g, '').trim();
+    if (!q) return false;
+    const hay = normalizeForSearchMatch(text);
+    if (hay.includes(q)) return true;
+
+    // 空白区切りの検索語でも、日本語本文内の連続表現を拾えるよう補助する。
+    const compactQ = compactForSearchMatch(q);
+    const compactHay = compactForSearchMatch(hay);
+    return compactQ.length >= 2 && compactHay.includes(compactQ);
+  }
+
+  function countSearchQueryOccurrences(text, query) {
+    const q = compactForSearchMatch(query).replace(/^["'「『]+|["'」』]+$/g, '');
+    const hay = compactForSearchMatch(text);
+    if (!q || !hay) return 0;
+    let count = 0;
+    let pos = 0;
+    while (true) {
+      const idx = hay.indexOf(q, pos);
+      if (idx < 0) break;
+      count += 1;
+      pos = idx + Math.max(1, q.length);
+    }
+    return count;
+  }
+
+  function tokenizeSearchQuery(query) {
+    const normalized = normalizeForSearchMatch(query)
+      .replace(/["'「」『』（）()【】\[\],，、/／|｜]+/g, ' ')
+      .trim();
+    if (!normalized) return [];
+    return uniqueStrings(
+      normalized
+        .split(/\s+/)
+        .map(x => x.trim())
+        .filter(Boolean)
+        .filter(x => !/^(?:and|or|not)$/i.test(x))
+    );
+  }
+
+  function searchContextKey(record) {
+    let conditions = {};
+    try {
+      conditions = JSON.parse(String(record?.['検索条件JSON'] || '{}')) || {};
+    } catch (e) {}
+    if (isObject(conditions)) {
+      delete conditions.start;
+      delete conditions.vjk;
+      delete conditions.from;
+      delete conditions.tk;
+      delete conditions.mobtk;
+      delete conditions.vjs;
+    }
+    return safeJsonStringify({
+      q: record?.['検索キーワード'] || '',
+      l: record?.['検索勤務地'] || '',
+      radius: record?.['検索半径'] || '',
+      conditions
+    });
+  }
+
+  function getSearchDerivedRows() {
+    const state = loadBatchState();
+    const rankByContext = new Map();
+    const rows = [];
+
+    for (const item of state.items || []) {
+      if (!item?.record || !['done', 'error'].includes(item.status)) continue;
+      const record = item.record;
+      const query = String(record['検索キーワード'] || '').trim();
+      const searchUrl = String(record['検索URL'] || '').trim();
+      if (!query && !searchUrl) continue; // 単体取得・手動URL取得は検索分析から除外
+
+      const contextKey = searchContextKey(record);
+      const observedRank = (rankByContext.get(contextKey) || 0) + 1;
+      rankByContext.set(contextKey, observedRank);
+
+      const fields = {
+        title: record['求人タイトル'] || record['検索時求人タイトル'] || '',
+        jobDescription: record['仕事内容'] || '',
+        qualification: record['求めている人材'] || '',
+        pr: record['PR・アピール情報'] || '',
+        body: record['本文全文'] || '',
+        occupations: record['Indeed職種分類名一覧'] || '',
+        attributes: record['Indeed抽出属性名一覧'] || '',
+        indeedTags: record['Indeed表示タグ'] || '',
+        relatedWhat: record['Indeed関連検索what'] || '',
+        searchTags: record['検索時タグ'] || ''
+      };
+
+      const matches = {
+        title: containsSearchQuery(fields.title, query),
+        jobDescription: containsSearchQuery(fields.jobDescription, query),
+        qualification: containsSearchQuery(fields.qualification, query),
+        pr: containsSearchQuery(fields.pr, query),
+        body: containsSearchQuery(fields.body, query),
+        occupations: containsSearchQuery(fields.occupations, query),
+        attributes: containsSearchQuery(fields.attributes, query),
+        indeedTags: containsSearchQuery(fields.indeedTags, query),
+        relatedWhat: containsSearchQuery(fields.relatedWhat, query),
+        searchTags: containsSearchQuery(fields.searchTags, query)
+      };
+
+      let matchType = 'F_一致検出なし';
+      if (matches.title) matchType = 'A_タイトル一致';
+      else if (matches.body || matches.jobDescription || matches.qualification || matches.pr) matchType = 'B_原稿本文一致';
+      else if (matches.occupations) matchType = 'C_Indeed職種分類一致';
+      else if (matches.attributes || matches.indeedTags) matchType = 'D_Indeed属性・タグ一致';
+      else if (matches.relatedWhat || matches.searchTags) matchType = 'E_関連検索・検索カード一致';
+
+      const tokens = tokenizeSearchQuery(query);
+      const combined = [
+        fields.title,
+        fields.body,
+        fields.occupations,
+        fields.attributes,
+        fields.indeedTags,
+        fields.relatedWhat,
+        fields.searchTags
+      ].join('\n');
+      const matchedTokenCount = tokens.filter(token => containsSearchQuery(combined, token)).length;
+      const tokenRatio = tokens.length ? matchedTokenCount / tokens.length : 0;
+
+      rows.push(Object.assign({}, record, {
+        '検索内通し順位（観測）': String(observedRank),
+        '検索語一致タイプ': matchType,
+        'タイトル検索語一致': boolText(matches.title),
+        '仕事内容検索語一致': boolText(matches.jobDescription),
+        '求めている人材検索語一致': boolText(matches.qualification),
+        'PR検索語一致': boolText(matches.pr),
+        '本文全文検索語一致': boolText(matches.body),
+        'Indeed職種分類検索語一致': boolText(matches.occupations),
+        'Indeed抽出属性検索語一致': boolText(matches.attributes),
+        'Indeed表示タグ検索語一致': boolText(matches.indeedTags),
+        'Indeed関連検索what検索語一致': boolText(matches.relatedWhat),
+        '検索時タグ検索語一致': boolText(matches.searchTags),
+        '全文検索語出現回数': String(countSearchQueryOccurrences(fields.body, query)),
+        '全体トークン一致率': tokens.length ? tokenRatio.toFixed(3) : ''
+      }));
+    }
+
+    return rows;
+  }
+
+  function buildProjectedTsv(headers, rows, includeHeader = true) {
+    if (!rows?.length) return '';
+    const lines = rows.map(row => headers.map(h => toTsvCell(row[h])).join('\t'));
+    return includeHeader ? `${headers.join('\t')}\n${lines.join('\n')}` : lines.join('\n');
+  }
+
+  function buildSearchDisplayAnalysisTsv(includeHeader = true) {
+    return buildProjectedTsv(SEARCH_DISPLAY_ANALYSIS_HEADERS, getSearchDerivedRows(), includeHeader);
+  }
+
+  function buildSearchMatchAnalysisTsv(includeHeader = true) {
+    return buildProjectedTsv(SEARCH_MATCH_ANALYSIS_HEADERS, getSearchDerivedRows(), includeHeader);
+  }
+
   function buildErrorUrlText() {
     const state = loadBatchState();
     return state.items
@@ -1867,6 +2102,36 @@
     } else {
       console.log(tsv);
       setBatchStatus('一括結果コピー失敗。コンソールへ出力しました', true);
+    }
+  }
+
+  async function copySearchDisplayAnalysis() {
+    const tsv = buildSearchDisplayAnalysisTsv(true);
+    if (!tsv) {
+      setBatchStatus('検索結果由来の取得データがありません', true);
+      return;
+    }
+    const ok = await copyText(tsv);
+    if (ok) {
+      setBatchStatus(`検索表示分析TSVをコピーしました（${SEARCH_DISPLAY_ANALYSIS_HEADERS.length}列）`);
+    } else {
+      console.log(tsv);
+      setBatchStatus('検索表示分析TSVのコピーに失敗。コンソールへ出力しました', true);
+    }
+  }
+
+  async function copySearchMatchAnalysis() {
+    const tsv = buildSearchMatchAnalysisTsv(true);
+    if (!tsv) {
+      setBatchStatus('検索結果由来の取得データがありません', true);
+      return;
+    }
+    const ok = await copyText(tsv);
+    if (ok) {
+      setBatchStatus(`検索語マッチ分析TSVをコピーしました（${SEARCH_MATCH_ANALYSIS_HEADERS.length}列）`);
+    } else {
+      console.log(tsv);
+      setBatchStatus('検索語マッチ分析TSVのコピーに失敗。コンソールへ出力しました', true);
     }
   }
 
@@ -2757,7 +3022,7 @@
       <div class="tm-collapsed-summary">待機中</div>
 
       <div class="tm-panel-body">
-        <div class="tm-sub">求人情報を取得し、スプレッドシート貼付け用TSVとしてコピーできます。</div>
+        <div class="tm-sub">求人情報を取得し、フルTSVと検索表示分析TSVをスプレッドシートへコピーできます。</div>
         <div class="tm-status tm-indeed-helper-status">初期化中</div>
 
         <div class="tm-group tm-main-actions">
@@ -2820,6 +3085,15 @@
         </div>
 
         <div class="tm-group">
+          <div class="tm-label">検索表示の分析用TSV</div>
+          <div class="tm-buttons-2">
+            <button class="btn-search-analysis-copy">検索表示分析TSVコピー</button>
+            <button class="btn-search-match-copy">検索語マッチTSVコピー</button>
+          </div>
+          <div class="tm-sub">フルTSVは保持したまま、検索語・観測順位・Indeed職種分類・抽出属性・原稿内一致などに絞った分析ビューをコピーします。一致判定はNFKC正規化後の文字列一致です。</div>
+        </div>
+
+        <div class="tm-group">
           <div class="tm-label">出力・トラブル対応</div>
           <div class="tm-buttons-2">
             <button class="btn-batch-download">TSVファイルDL</button>
@@ -2851,6 +3125,8 @@
     panel.querySelector('.btn-collect-all').addEventListener('click', () => startFullSearchCrawl('collect-only'));
 
     panel.querySelector('.btn-batch-start').addEventListener('click', () => startOrResumeBatch({ forceFromTextarea: true, preferExistingProgress: false, freshSession: true }));
+    panel.querySelector('.btn-search-analysis-copy').addEventListener('click', () => copySearchDisplayAnalysis());
+    panel.querySelector('.btn-search-match-copy').addEventListener('click', () => copySearchMatchAnalysis());
     panel.querySelector('.btn-batch-download').addEventListener('click', () => downloadBatchResults());
     panel.querySelector('.btn-error-copy').addEventListener('click', () => copyErrorUrls());
 
@@ -2927,6 +3203,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.0.0: loaded');
+  console.log('Indeed Helper Batch Export v2.1.0: loaded');
 })();
 
