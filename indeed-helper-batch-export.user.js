@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
-// @description  現行Indeedの検索結果・求人詳細・Indeed解釈を取得し、フルTSVと検索表示分析TSVを出力
+// @version      2.2.0
+// @description  現行Indeedの検索結果・求人詳細を取得し、営業向け求人調査・検索分析・フルTSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
 // @grant        GM_getValue
@@ -186,6 +186,50 @@
     '主要項目取得数',
     '全項目取得数',
     '取得スキーマVersion'
+  ];
+
+  // 営業ユーザー向け。技術診断・JSON・ユーザー行動系を除き、競合原稿調査に必要な求人情報へ絞る。
+  const SALES_RESEARCH_HEADERS = [
+    '検索キーワード',
+    '検索勤務地',
+    '検索内通し順位（観測）',
+    '検索ページ番号',
+    'ページ内表示順',
+    '求人キー',
+    '求人タイトル',
+    'normalizedtitle相当',
+    'Indeed職種分類名一覧',
+    'Indeed抽出属性名一覧',
+    'Indeed表示タグ',
+    'Indeed関連検索what（raw）',
+    '関連検索what補助候補',
+    '会社名',
+    '勤務地表示',
+    '雇用形態表示',
+    '給与テキスト',
+    '掲載日時',
+    '掲載経過表示',
+    '検索結果新着表示',
+    '検索時返信率の高い企業表示',
+    'Indeed掲載ソース',
+    'originalJobLink',
+    '求人写真数',
+    'TOP画像URL',
+    '求人写真URL一覧',
+    '企業ロゴURL',
+    '仕事内容',
+    '求めている人材',
+    '勤務時間詳細',
+    '休日休暇',
+    '給与詳細',
+    '待遇福利厚生',
+    '職場環境',
+    'PR・アピール情報',
+    '検索語一致タイプ',
+    'タイトル検索語一致',
+    'normalizedtitle相当検索語一致',
+    'Indeed職種分類検索語一致',
+    '仕事内容検索語一致'
   ];
 
   // フルTSVとは別に、検索語と表示求人の関係を確認しやすい分析ビューを出力する。
@@ -1418,7 +1462,8 @@
       seedUrls: [],
       collectedItems: [],
       visitedPages: [],
-      pageCount: 0
+      pageCount: 0,
+      maxPages: 0
     };
   }
 
@@ -1855,6 +1900,54 @@
     return includeHeader ? `${headers.join('\t')}\n${lines.join('\n')}` : lines.join('\n');
   }
 
+  function splitRelatedWhat(raw) {
+    const values = String(raw || '').split(ARRAY_SEP).map(x => x.trim()).filter(Boolean);
+    return {
+      normalizedTitleProxy: values[0] || '',
+      relatedCandidates: values.slice(1).join(ARRAY_SEP)
+    };
+  }
+
+  function firstPhotoUrl(raw) {
+    return String(raw || '').split(ARRAY_SEP).map(x => x.trim()).filter(Boolean)[0] || '';
+  }
+
+  function getSalesResearchRows() {
+    const derived = getSearchDerivedRows();
+    const derivedByKey = new Map();
+    derived.forEach(row => {
+      const key = String(row['求人キー'] || row['canonical URL'] || row['取得URL'] || '');
+      if (key) derivedByKey.set(key, row);
+    });
+
+    const state = loadBatchState();
+    const rows = [];
+    for (const item of state.items || []) {
+      if (!item?.record || !['done', 'error'].includes(item.status)) continue;
+      const base = item.record;
+      const key = String(base['求人キー'] || base['canonical URL'] || base['取得URL'] || '');
+      const row = derivedByKey.get(key) || base;
+      const related = splitRelatedWhat(row['Indeed関連検索what']);
+      const query = row['検索キーワード'] || '';
+      rows.push(Object.assign({}, row, {
+        'normalizedtitle相当': related.normalizedTitleProxy,
+        'Indeed関連検索what（raw）': row['Indeed関連検索what'] || '',
+        '関連検索what補助候補': related.relatedCandidates,
+        'TOP画像URL': firstPhotoUrl(row['求人写真URL一覧']),
+        'normalizedtitle相当検索語一致': query ? boolText(containsSearchQuery(related.normalizedTitleProxy, query)) : '',
+        '検索語一致タイプ': row['検索語一致タイプ'] || '',
+        'タイトル検索語一致': row['タイトル検索語一致'] || '',
+        'Indeed職種分類検索語一致': row['Indeed職種分類検索語一致'] || '',
+        '仕事内容検索語一致': row['仕事内容検索語一致'] || ''
+      }));
+    }
+    return rows;
+  }
+
+  function buildSalesResearchTsv(includeHeader = true) {
+    return buildProjectedTsv(SALES_RESEARCH_HEADERS, getSalesResearchRows(), includeHeader);
+  }
+
   function buildSearchDisplayAnalysisTsv(includeHeader = true) {
     return buildProjectedTsv(SEARCH_DISPLAY_ANALYSIS_HEADERS, getSearchDerivedRows(), includeHeader);
   }
@@ -2053,16 +2146,16 @@
     refreshSearchInfo();
 
     if (partial) {
-      setSearchStatus(`全ページ収集を停止しました。${items.length}件をキュー化しました`);
+      setSearchStatus(`検索結果収集を停止しました。${items.length}件をキュー化しました`);
       return;
     }
 
     if (shouldStartBatch) {
-      setSearchStatus(`全ページ収集完了。${items.length}件をキュー化し、そのまま開始します`);
+      setSearchStatus(`検索結果収集完了。${items.length}件をキュー化し、そのまま開始します`);
       setBatchStatus('全ページ収集が終わったので一括処理へ進みます');
       goToNextPending();
     } else {
-      setSearchStatus(`全ページ収集完了。${items.length}件をキュー化しました`);
+      setSearchStatus(`検索結果収集完了。${items.length}件をキュー化しました`);
     }
   }
 
@@ -2102,6 +2195,21 @@
     } else {
       console.log(tsv);
       setBatchStatus('一括結果コピー失敗。コンソールへ出力しました', true);
+    }
+  }
+
+  async function copySalesResearch() {
+    const tsv = buildSalesResearchTsv(true);
+    if (!tsv) {
+      setBatchStatus('検索結果由来の取得データがありません', true);
+      return;
+    }
+    const ok = await copyText(tsv);
+    if (ok) {
+      setBatchStatus(`求人調査データをコピーしました（${SALES_RESEARCH_HEADERS.length}列）`);
+    } else {
+      console.log(tsv);
+      setBatchStatus('求人調査データのコピーに失敗。コンソールへ出力しました', true);
     }
   }
 
@@ -2475,13 +2583,70 @@
     goToNextPending();
   }
 
+  function startCurrentSearchPageFresh() {
+    if (!isSearchResultsPage()) {
+      setSearchStatus('検索結果ページで実行してください', true);
+      return;
+    }
+    const entries = collectSearchResultEntries();
+    if (!entries.length) {
+      setSearchStatus('このページから求人リンクを取得できませんでした', true);
+      return;
+    }
+    clearBatchState();
+    clearSearchCrawlState();
+    const ta = document.querySelector(`#${PANEL_ID} textarea`);
+    if (ta) { ta.value = ''; ta.dataset.userEdited = ''; }
+    const startedAt = nowText();
+    const sessionId = makeSessionId();
+    const profileLabel = getProfileLabel();
+    const items = entries.map(item => ({
+      ...item,
+      status: 'pending',
+      source: '',
+      error: '',
+      processedAt: '',
+      record: null,
+      searchMeta: mergeSearchMeta({
+        '取得セッションID': sessionId,
+        'クロール開始日時': startedAt,
+        '取得プロファイル': profileLabel
+      }, item.searchMeta || {})
+    }));
+    saveBatchState({
+      active: true,
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      sessionId,
+      crawlStartedAt: startedAt,
+      profileLabel,
+      items
+    });
+    refreshBatchInfo();
+    refreshSearchInfo();
+    setSearchStatus(`このページの${items.length}件を新規取得します`);
+    setBatchStatus('前回結果をクリアし、このページの求人取得を開始します');
+    goToNextPending();
+  }
+
+  function startSelectedSearchRange() {
+    const select = document.querySelector(`#${PANEL_ID} .tm-range-select`);
+    const range = select ? select.value : '3';
+    if (range === 'current') {
+      startCurrentSearchPageFresh();
+      return;
+    }
+    const maxPages = range === 'all' ? 0 : Math.max(1, Number(range) || 3);
+    startFullSearchCrawl('collect-and-start', { fresh: true, maxPages });
+  }
+
   function startFullSearchCrawl(mode, options = {}) {
     if (!isSearchResultsPage()) {
       setSearchStatus('検索結果ページで実行してください', true);
       return;
     }
 
-    const { fresh = false } = options || {};
+    const { fresh = false, maxPages = 0 } = options || {};
     const ta = document.querySelector(`#${PANEL_ID} textarea`);
 
     if (fresh) {
@@ -2509,15 +2674,16 @@
       seedUrls: uniqueNormalizedUrls(seedUrls),
       collectedItems: [],
       visitedPages: [],
-      pageCount: 0
+      pageCount: 0,
+      maxPages: Math.max(0, Number(maxPages) || 0)
     };
 
     saveSearchCrawlState(state);
     refreshSearchInfo();
     refreshBatchInfo();
     setSearchStatus(mode === 'collect-and-start'
-      ? (fresh ? '新規取得として全ページ収集を開始します。前回結果はクリア済みです' : '全ページ収集を開始します。収集後に一括取得も始めます')
-      : '全ページ収集を開始します');
+      ? (fresh ? `新規取得として${maxPages ? `${maxPages}ページまで` : '全ページ'}収集を開始します。前回結果はクリア済みです` : '検索結果収集を開始します。収集後に一括取得も始めます')
+      : '検索結果の収集を開始します');
 
     autoRunSearchCrawlIfNeeded();
   }
@@ -2592,7 +2758,7 @@
     if (!state.active) return;
     if (!isSearchResultsPage()) return;
     if (isChallengePage()) {
-      setSearchStatus('認証/ブロック画面のため全ページ収集を停止しました', true);
+      setSearchStatus('認証/ブロック画面のため検索結果収集を停止しました', true);
       finalizeSearchCrawl({ partial: true, forceBatchStart: false });
       return;
     }
@@ -2624,8 +2790,9 @@
 
       const nextUrl = findNextSearchPageUrl();
       const refreshedState = loadSearchCrawlState();
+      const reachedPageLimit = Number(refreshedState.maxPages || 0) > 0 && refreshedState.pageCount >= Number(refreshedState.maxPages || 0);
 
-      if (nextUrl && !refreshedState.visitedPages.includes(normalizeUrl(nextUrl))) {
+      if (!reachedPageLimit && nextUrl && !refreshedState.visitedPages.includes(normalizeUrl(nextUrl))) {
         setSearchStatus(`検索結果 ${refreshedState.pageCount}ページ目まで収集。次ページへ移動します`);
         await sleep(900);
         location.href = nextUrl;
@@ -2635,7 +2802,7 @@
       finalizeSearchCrawl({ partial: false });
     } catch (err) {
       console.error(err);
-      setSearchStatus(`全ページ収集でエラー: ${err.message || err}`, true);
+      setSearchStatus(`検索結果収集でエラー: ${err.message || err}`, true);
       finalizeSearchCrawl({ partial: true, forceBatchStart: false });
     } finally {
       window.__tmIndeedSearchCrawlRunning = false;
@@ -2694,7 +2861,7 @@
       refreshRunButtonLabel();
 
       setStatus(`表示中の求人を取得しました: ${record['求人タイトル'] || record['ページタイトル'] || canonicalUrl}`);
-      setBatchStatus('取得完了。必要に応じて「取得データをTSVコピー」を押してください');
+      setBatchStatus('取得完了。必要に応じて「求人調査データをコピー」を押してください');
     } catch (err) {
       console.error(err);
       setStatus(`表示中の求人取得に失敗: ${err.message || err}`, true);
@@ -2834,7 +3001,7 @@
     style.textContent = `
       #${PANEL_ID} {
         position: fixed;
-        top: 16px;
+        top: 72px;
         right: 16px;
         z-index: 2147483647;
         width: 360px;
@@ -2849,9 +3016,12 @@
         color: #111827;
       }
       #${PANEL_ID}.tm-collapsed {
-        width: 210px;
-        padding: 10px;
+        top: 140px;
+        right: 0;
+        width: 190px;
+        padding: 9px 10px;
         overflow: hidden;
+        border-radius: 12px 0 0 12px;
       }
       #${PANEL_ID} .tm-panel-head {
         display: flex;
@@ -2987,6 +3157,21 @@
         font-weight: 800;
         margin-bottom: 6px;
       }
+      #${PANEL_ID} .tm-range-select {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        padding: 9px 10px;
+        font-size: 12px;
+        background: #fff;
+        margin-bottom: 8px;
+      }
+      #${PANEL_ID}.tm-page-search .tm-detail-only { display: none; }
+      #${PANEL_ID}.tm-page-detail .tm-search-only { display: none; }
+      #${PANEL_ID}.tm-page-other .tm-search-only,
+      #${PANEL_ID}.tm-page-other .tm-detail-only { display: none; }
+
       #${PANEL_ID} .tm-details {
         margin-top: 10px;
         border-top: 1px solid #e5e7eb;
@@ -3022,86 +3207,105 @@
       <div class="tm-collapsed-summary">待機中</div>
 
       <div class="tm-panel-body">
-        <div class="tm-sub">求人情報を取得し、フルTSVと検索表示分析TSVをスプレッドシートへコピーできます。</div>
+        <div class="tm-sub">求人調査データを取得し、Excel / スプレッドシートへ貼り付けできます。</div>
         <div class="tm-status tm-indeed-helper-status">初期化中</div>
 
-        <div class="tm-group tm-main-actions">
-        <div class="tm-label">通常操作</div>
-        <div class="tm-buttons">
-          <button class="btn-single-save tm-primary">表示中の求人を取得</button>
-          <button class="btn-collect-all-start tm-primary">新規取得：検索結果すべて</button>
-          <button class="btn-batch-copy">取得データをTSVコピー</button>
+        <div class="tm-group tm-main-actions tm-search-only">
+          <div class="tm-label">検索結果を取得</div>
+          <select class="tm-range-select">
+            <option value="current">このページだけ</option>
+            <option value="3" selected>3ページまで</option>
+            <option value="all">全ページ</option>
+          </select>
+          <div class="tm-buttons">
+            <button class="btn-range-start tm-primary">取得開始</button>
+          </div>
+          <div class="tm-sub">新規取得として前回結果を自動クリアします。軽い競合調査は「このページ」、傾向確認は「3ページ」、全件分析は「全ページ」が目安です。</div>
+        </div>
+
+        <div class="tm-group tm-main-actions tm-detail-only">
+          <div class="tm-label">表示中の求人</div>
+          <div class="tm-buttons">
+            <button class="btn-single-save tm-primary">この求人を取得</button>
+          </div>
+        </div>
+
+        <div class="tm-group">
+          <div class="tm-label">コピー</div>
+          <div class="tm-buttons">
+            <button class="btn-sales-copy tm-primary">求人調査データをコピー</button>
+          </div>
+          <div class="tm-sub">営業向けの主要求人項目だけをコピーします（Excel / スプレッドシート貼り付け用）。</div>
         </div>
 
         <div class="tm-buttons-2" style="margin-top:8px;">
           <button class="btn-toggle-run tm-muted">取得を再開</button>
           <button class="btn-batch-clear tm-danger">取得情報クリア</button>
         </div>
-      </div>
 
-      <div class="tm-info tm-indeed-helper-batch-info"></div>
-      <div class="tm-batch-status tm-indeed-helper-batch-status">待機中</div>
-      <div class="tm-search-status tm-indeed-helper-search-status">待機中</div>
+        <div class="tm-info tm-indeed-helper-batch-info"></div>
+        <div class="tm-batch-status tm-indeed-helper-batch-status">待機中</div>
+        <div class="tm-search-status tm-indeed-helper-search-status">待機中</div>
 
-      <details class="tm-details">
-        <summary>詳細メニュー</summary>
+        <details class="tm-details">
+          <summary>その他の機能</summary>
 
-        <div class="tm-group">
-          <div class="tm-label">表示中の求人</div>
-          <div class="tm-buttons-2">
-            <button class="btn-copy-header">見出し付きで即コピー</button>
-            <button class="btn-copy-row">1行だけ即コピー</button>
+          <div class="tm-group">
+            <div class="tm-label">その他の出力</div>
+            <div class="tm-buttons-2">
+              <button class="btn-search-analysis-copy">検索表示分析TSVをコピー</button>
+              <button class="btn-search-match-copy">検索語マッチTSVをコピー</button>
+            </div>
+            <div class="tm-buttons" style="margin-top:8px;">
+              <button class="btn-batch-copy tm-muted">フルデータTSVをコピー</button>
+            </div>
           </div>
-          <div class="tm-buttons" style="margin-top:8px;">
-            <button class="btn-copy-json tm-muted">JSONコピー（開発用）</button>
-          </div>
-        </div>
 
-        <div class="tm-group">
-          <div class="tm-label">検索結果ページの詳細操作</div>
-          <div class="tm-buttons-2">
-            <button class="btn-collect-results">現ページだけURL追加</button>
-            <button class="btn-collect-start">現ページを追加取得</button>
+          <div class="tm-group tm-detail-only">
+            <div class="tm-label">表示中の求人・開発用</div>
+            <div class="tm-buttons-2">
+              <button class="btn-copy-header">見出し付きで即コピー</button>
+              <button class="btn-copy-row">1行だけ即コピー</button>
+            </div>
+            <div class="tm-buttons" style="margin-top:8px;">
+              <button class="btn-copy-json tm-muted">JSONコピー（開発用）</button>
+            </div>
           </div>
-          <div class="tm-buttons" style="margin-top:8px;">
-            <button class="btn-collect-all tm-muted">全ページURL収集のみ</button>
-          </div>
-          <div class="tm-info tm-indeed-helper-search-info"></div>
-          <div class="tm-sub">URLだけ集めたい場合や、検索結果1ページだけを扱いたい場合に使います。</div>
-        </div>
 
-        <div class="tm-group">
-          <div class="tm-label">取得プロファイル（任意）</div>
-          <input class="tm-profile-input" type="text" placeholder="例: browser_A / driver_history / logged_out" />
-          <div class="tm-sub">検索履歴・ログイン状態の比較用ラベルです。メールアドレス等の個人情報は入れず、任意の実験名だけを設定してください。</div>
-        </div>
-
-        <div class="tm-group">
-          <div class="tm-label">手動URL一覧（1行1件）</div>
-          <textarea placeholder="https://jp.indeed.com/viewjob?jk=...\nhttps://jp.indeed.com/viewjob?jk=..."></textarea>
-          <div class="tm-buttons" style="margin-top:8px;">
-            <button class="btn-batch-start">手動URL一覧から新規取得</button>
+          <div class="tm-group tm-search-only">
+            <div class="tm-label">検索結果の追加操作</div>
+            <div class="tm-buttons-2">
+              <button class="btn-collect-results">現ページURLを追加</button>
+              <button class="btn-collect-start">現ページを追加取得</button>
+            </div>
+            <div class="tm-buttons" style="margin-top:8px;">
+              <button class="btn-collect-all tm-muted">全ページURL収集のみ</button>
+            </div>
+            <div class="tm-info tm-indeed-helper-search-info"></div>
           </div>
-        </div>
 
-        <div class="tm-group">
-          <div class="tm-label">検索表示の分析用TSV</div>
-          <div class="tm-buttons-2">
-            <button class="btn-search-analysis-copy">検索表示分析TSVコピー</button>
-            <button class="btn-search-match-copy">検索語マッチTSVコピー</button>
+          <div class="tm-group">
+            <div class="tm-label">取得プロファイル（任意）</div>
+            <input class="tm-profile-input" type="text" placeholder="例: browser_A / driver_history / logged_out" />
+            <div class="tm-sub">比較実験用ラベルです。個人情報は入力しないでください。</div>
           </div>
-          <div class="tm-sub">フルTSVは保持したまま、検索語・観測順位・Indeed職種分類・抽出属性・原稿内一致などに絞った分析ビューをコピーします。一致判定はNFKC正規化後の文字列一致です。</div>
-        </div>
 
-        <div class="tm-group">
-          <div class="tm-label">出力・トラブル対応</div>
-          <div class="tm-buttons-2">
-            <button class="btn-batch-download">TSVファイルDL</button>
-            <button class="btn-error-copy">失敗URLコピー</button>
+          <div class="tm-group">
+            <div class="tm-label">手動URL一覧（1行1件）</div>
+            <textarea placeholder="https://jp.indeed.com/viewjob?jk=...\nhttps://jp.indeed.com/viewjob?jk=..."></textarea>
+            <div class="tm-buttons" style="margin-top:8px;">
+              <button class="btn-batch-start">手動URL一覧から新規取得</button>
+            </div>
           </div>
-          <div class="tm-sub">「新規取得」は前回結果を自動クリアします。「追加取得」は既存結果を残して新しいURLだけ取得します。</div>
-        </div>
-      </details>
+
+          <div class="tm-group">
+            <div class="tm-label">ファイル・トラブル対応</div>
+            <div class="tm-buttons-2">
+              <button class="btn-batch-download">フルTSVファイルDL</button>
+              <button class="btn-error-copy">失敗URLコピー</button>
+            </div>
+          </div>
+        </details>
       </div>
     `;
 
@@ -3109,9 +3313,11 @@
 
     panel.querySelector('.btn-panel-collapse').addEventListener('click', () => togglePanelCollapsed());
     applyPanelCollapsedState(loadPanelCollapsed());
+    updatePanelPageContext();
 
-    panel.querySelector('.btn-single-save').addEventListener('click', () => saveCurrentJobAsSingleResult());
-    panel.querySelector('.btn-collect-all-start').addEventListener('click', () => startFullSearchCrawl('collect-and-start', { fresh: true }));
+    panel.querySelector('.btn-single-save')?.addEventListener('click', () => saveCurrentJobAsSingleResult());
+    panel.querySelector('.btn-range-start')?.addEventListener('click', () => startSelectedSearchRange());
+    panel.querySelector('.btn-sales-copy').addEventListener('click', () => copySalesResearch());
     panel.querySelector('.btn-batch-copy').addEventListener('click', () => copyBatchResults());
     panel.querySelector('.btn-toggle-run').addEventListener('click', () => toggleRunPause());
     panel.querySelector('.btn-batch-clear').addEventListener('click', () => clearBatchResults());
@@ -3145,8 +3351,19 @@
     refreshRunButtonLabel();
   }
 
+  function updatePanelPageContext() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const searchPage = isSearchResultsPage() && !location.pathname.includes('/viewjob');
+    const detailPage = !searchPage && Boolean(getJobKeyFromUrl(location.href));
+    panel.classList.toggle('tm-page-search', searchPage);
+    panel.classList.toggle('tm-page-detail', detailPage);
+    panel.classList.toggle('tm-page-other', !searchPage && !detailPage);
+  }
+
   function refreshStatus() {
     try {
+      updatePanelPageContext();
       if (isChallengePage()) {
         setStatus('認証/ブロック画面の可能性があります', true);
         return;
@@ -3203,6 +3420,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.1.0: loaded');
+  console.log('Indeed Helper Batch Export v2.2.0: loaded');
 })();
 
