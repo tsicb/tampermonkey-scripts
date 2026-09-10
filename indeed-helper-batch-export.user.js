@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
-// @description  現行Indeedの検索結果・求人詳細を取得し、semantic/本文見出しを構造化して営業向け求人調査・検索分析・フルTSVを出力
+// @version      2.4.1
+// @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
 // @grant        GM_getValue
@@ -18,11 +18,11 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v5';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v5';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v6';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v6';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v5';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v6';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -57,7 +57,7 @@
     '検索時会社名',
     '検索時勤務地',
     '検索時給与',
-    '検索時雇用形態',
+    '検索時求人メタ表示',
     '検索時タグ',
     '検索時スニペット',
     '検索時会社評価',
@@ -73,7 +73,7 @@
     '雇用形態表示',
     '雇用形態コード',
     'リモート求人',
-    'HiringEvent',
+    '詳細HiringEvent',
     'インターン求人',
     '会社名',
     '求人本文内企業名',
@@ -107,7 +107,7 @@
     '給与例',
     '掲載日時',
     '掲載経過表示',
-    '募集期限',
+    'JSON-LD有効期限',
     '募集終了判定',
     'Indeed掲載ソース',
     'originalJobLink',
@@ -191,14 +191,1320 @@
     '取得スキーマVersion'
   ];
 
+  // フルTSVは機械処理しやすい1行ヘッダーを維持し、元key・意味・注意事項は別の項目定義TSVで参照する。
+  const FIELD_DEFINITION_HEADERS = [
+    'No',
+    'フルTSV列名',
+    '元HTML・JSON key / DOM',
+    'データソース',
+    '型',
+    '意味・用途',
+    '注意事項',
+    '解釈確度'
+  ];
+
+  const FIELD_DEFINITION_MAP = Object.freeze({
+  "取得セッションID": {
+    "rawKey": "（スクリプト派生）sessionId",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "同じ取得操作に属する求人をまとめるためのセッションID",
+    "note": "Indeed本体の値ではない",
+    "confidence": "高"
+  },
+  "クロール開始日時": {
+    "rawKey": "（スクリプト派生）crawlStartedAt",
+    "source": "Indeed Helper",
+    "type": "日時",
+    "meaning": "検索結果クロールを開始したローカル日時",
+    "note": "Indeed本体の掲載時刻ではない",
+    "confidence": "高"
+  },
+  "詳細取得日時": {
+    "rawKey": "（スクリプト派生）nowText()",
+    "source": "Indeed Helper",
+    "type": "日時",
+    "meaning": "各求人詳細を取得・解析したローカル日時",
+    "note": "ページ生成時刻とは限らない",
+    "confidence": "高"
+  },
+  "取得プロファイル": {
+    "rawKey": "localStorage/GM: tmIndeedHelperProfileLabel_v1",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "比較実験用に利用者が任意設定する取得ラベル",
+    "note": "個人情報を入れない運用を推奨",
+    "confidence": "高"
+  },
+  "ログイン状態": {
+    "rawKey": "loggedIn / isLoggedIn / saveJobButtonContainerModel.isLoggedIn",
+    "source": "検索/詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "取得時にIndeedへログインしていたか",
+    "note": "検索ページと詳細ページで参照keyが異なる",
+    "confidence": "高"
+  },
+  "取得URL": {
+    "rawKey": "location.href（追跡パラメータ除去）",
+    "source": "ブラウザURL",
+    "type": "URL",
+    "meaning": "実際に詳細取得に使用したURL",
+    "note": "スクリプトでサニタイズ",
+    "confidence": "高"
+  },
+  "canonical URL": {
+    "rawKey": "link[rel=canonical] または jobKeyから生成",
+    "source": "詳細HTML/派生",
+    "type": "URL",
+    "meaning": "求人の正規URL",
+    "note": "jobKeyが取れる場合はviewjob?jk=...へ正規化",
+    "confidence": "高"
+  },
+  "ページタイトル": {
+    "rawKey": "document.title",
+    "source": "詳細DOM",
+    "type": "文字列",
+    "meaning": "取得時のHTML title",
+    "note": "表示用情報",
+    "confidence": "高"
+  },
+  "検索URL": {
+    "rawKey": "location.href（検索追跡パラメータ除去）",
+    "source": "検索ページURL",
+    "type": "URL",
+    "meaning": "求人が観測された検索結果ページURL",
+    "note": "検索結果由来でない求人は空欄",
+    "confidence": "高"
+  },
+  "検索キーワード": {
+    "rawKey": "URL q / parsedQ",
+    "source": "検索URL/_initialData",
+    "type": "文字列",
+    "meaning": "検索時のwhatキーワード",
+    "note": "検索結果分析の基準語",
+    "confidence": "高"
+  },
+  "検索勤務地": {
+    "rawKey": "URL l / parsedL",
+    "source": "検索URL/_initialData",
+    "type": "文字列",
+    "meaning": "検索時のwhere勤務地",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索半径": {
+    "rawKey": "URL radius",
+    "source": "検索URL",
+    "type": "文字列",
+    "meaning": "検索時の検索半径パラメータ",
+    "note": "未指定は空欄",
+    "confidence": "高"
+  },
+  "検索start値": {
+    "rawKey": "URL start",
+    "source": "検索URL",
+    "type": "整数",
+    "meaning": "検索結果ページのstartパラメータ",
+    "note": "ページ番号そのものとは別",
+    "confidence": "高"
+  },
+  "検索ページ番号": {
+    "rawKey": "pageNum / pageNumber / startから派生",
+    "source": "検索 _initialData/派生",
+    "type": "整数",
+    "meaning": "検索結果のページ番号",
+    "note": "pageNum等が無い場合はstartから推定",
+    "confidence": "高"
+  },
+  "検索総件数": {
+    "rawKey": "totalJobCount / resultsInfoModel.totalNumResults / uniqueJobsCount",
+    "source": "検索 _initialData",
+    "type": "整数",
+    "meaning": "その検索ページ取得時点でIndeedが返した総件数",
+    "note": "ページ間で変動する場合がある",
+    "confidence": "高"
+  },
+  "関連検索候補": {
+    "rawKey": "relatedQueries[].query",
+    "source": "検索 _initialData",
+    "type": "配列(::)",
+    "meaning": "検索結果ページ側で提示される関連検索候補",
+    "note": "求人詳細のIndeed関連検索what/whereとは別",
+    "confidence": "高"
+  },
+  "検索条件JSON": {
+    "rawKey": "URLSearchParams（追跡系除外）",
+    "source": "検索URL/派生",
+    "type": "JSON",
+    "meaning": "検索条件を再現するためのURLパラメータJSON",
+    "note": "技術検証用",
+    "confidence": "高"
+  },
+  "次ページURL": {
+    "rawKey": "検索結果の次ページリンクhref",
+    "source": "検索DOM",
+    "type": "URL",
+    "meaning": "取得時に観測した次ページURL",
+    "note": "存在しない場合は空欄",
+    "confidence": "高"
+  },
+  "ページ内表示順": {
+    "rawKey": "検索カードDOM順",
+    "source": "検索DOM/派生",
+    "type": "整数",
+    "meaning": "その検索ページ内で観測した求人カードの順番",
+    "note": "Indeed内部rankとは断定しない",
+    "confidence": "高"
+  },
+  "検索結果元リンク": {
+    "rawKey": "a[data-jk] 等のhref",
+    "source": "検索DOM",
+    "type": "URL",
+    "meaning": "検索カードから詳細へ遷移する元リンク",
+    "note": "追跡リンクを含む場合がある",
+    "confidence": "高"
+  },
+  "検索結果リンク種別": {
+    "rawKey": "hrefパスから派生",
+    "source": "検索DOM/派生",
+    "type": "文字列",
+    "meaning": "pagead/rc/clk/viewjob等のリンク種別",
+    "note": "スポンサー判定とは別",
+    "confidence": "高"
+  },
+  "検索結果スポンサー明示": {
+    "rawKey": "カード内の「スポンサー/Sponsored」表示",
+    "source": "検索DOM",
+    "type": "真偽値",
+    "meaning": "検索カード上でスポンサー表記が明示されたか",
+    "note": "pageadリンクだけではTRUEにしない",
+    "confidence": "高"
+  },
+  "検索結果スポンサー根拠": {
+    "rawKey": "スポンサー明示テキスト等",
+    "source": "検索DOM/派生",
+    "type": "文字列",
+    "meaning": "スポンサー明示判定に使った観測根拠",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索結果新着表示": {
+    "rawKey": "[data-testid=new-job-tag] / .jobTitle-newJob",
+    "source": "検索DOM",
+    "type": "真偽値",
+    "meaning": "検索カードに新着表示があったか",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索結果HiringEvent": {
+    "rawKey": "a[data-hiring-event]",
+    "source": "検索DOM",
+    "type": "真偽値",
+    "meaning": "検索カードがIndeed Hiring Event求人として示されるか",
+    "note": "採用イベント機能との紐づきと推定",
+    "confidence": "中"
+  },
+  "検索時求人タイトル": {
+    "rawKey": ".jcs-JobTitle / a[data-jk]",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上に表示された求人タイトル",
+    "note": "詳細タイトルとの比較用",
+    "confidence": "高"
+  },
+  "検索時会社名": {
+    "rawKey": "[data-testid=company-name]",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上の会社名",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索時勤務地": {
+    "rawKey": "[data-testid=text-location]",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上の勤務地表示",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索時給与": {
+    "rawKey": ".salary-snippet-container",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上の給与表示",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索時求人メタ表示": {
+    "rawKey": "ul.metadataContainer 内の給与以外の先頭表示",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カードのメタ情報領域で先頭に見えていた表示",
+    "note": "「正社員 +3」等。雇用形態専用ではない",
+    "confidence": "高"
+  },
+  "検索時タグ": {
+    "rawKey": ".jobsearch-JobCard-tag",
+    "source": "検索DOM",
+    "type": "配列(::)",
+    "meaning": "検索カード上で表示されたタグ",
+    "note": "詳細のIndeed表示タグとは別表示経路",
+    "confidence": "高"
+  },
+  "検索時スニペット": {
+    "rawKey": "[data-testid=belowJobSnippet] / .job-snippet",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上の本文スニペット",
+    "note": "現HTMLでは空欄になる求人も多い",
+    "confidence": "高"
+  },
+  "検索時会社評価": {
+    "rawKey": "[data-testid=holistic-rating]",
+    "source": "検索DOM",
+    "type": "数値/文字列",
+    "meaning": "検索カード上の会社評価表示",
+    "note": "",
+    "confidence": "高"
+  },
+  "検索時返信率の高い企業表示": {
+    "rawKey": "[data-testid=responsiveEmployer]",
+    "source": "検索DOM",
+    "type": "文字列",
+    "meaning": "検索カード上の「返信率の高い企業」等の表示",
+    "note": "数値responseRateとは別",
+    "confidence": "高"
+  },
+  "検索カード属性JSON": {
+    "rawKey": "data-ci/data-empn/data-hiring-event/IndeedApply等",
+    "source": "検索DOM/派生",
+    "type": "JSON",
+    "meaning": "検索カードで観測した補助属性のraw保持",
+    "note": "開発・検証用",
+    "confidence": "高"
+  },
+  "詳細HTML sponsored(raw)": {
+    "rawKey": "sponsored",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "詳細HTML側のsponsored raw値",
+    "note": "検索結果スポンサー明示とは別。意味を過剰解釈しない",
+    "confidence": "高"
+  },
+  "requestPath": {
+    "rawKey": "requestPath",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "Indeed内部の詳細リクエストパス",
+    "note": "追跡パラメータを除去して保持",
+    "confidence": "高"
+  },
+  "求人キー": {
+    "rawKey": "jobKey / jk",
+    "source": "詳細 _initialData/URL",
+    "type": "文字列",
+    "meaning": "Indeed求人を識別するjobKey",
+    "note": "主要結合キー",
+    "confidence": "高"
+  },
+  "求人タイトル": {
+    "rawKey": "jobInfoHeaderModel.jobTitle 等",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "求人詳細ページのタイトル",
+    "note": "",
+    "confidence": "高"
+  },
+  "Indeed標準職種名": {
+    "rawKey": "jobInfoHeaderModel.jobNormTitle",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細モデルに露出しているIndeed側の標準職種名フィールド",
+    "note": "現行HTMLでは空欄が多い。旧normalizedtitleと同一とは限らない",
+    "confidence": "中"
+  },
+  "言語": {
+    "rawKey": "jobLanguage / language",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "求人言語",
+    "note": "",
+    "confidence": "高"
+  },
+  "国": {
+    "rawKey": "jobCountry / country",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "求人の国情報",
+    "note": "",
+    "confidence": "高"
+  },
+  "雇用形態表示": {
+    "rawKey": "jobMetadataHeaderModel.jobType / formattedJobTypes.content",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細ページ側の雇用形態表示",
+    "note": "JSON-LD employmentTypeとは別経路",
+    "confidence": "高"
+  },
+  "雇用形態コード": {
+    "rawKey": "employmentType",
+    "source": "JSON-LD JobPosting",
+    "type": "配列/文字列",
+    "meaning": "JSON-LD上の雇用形態コード/値",
+    "note": "",
+    "confidence": "高"
+  },
+  "リモート求人": {
+    "rawKey": "jobInfoHeaderModel.remoteLocation / remoteLocation",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "Indeed詳細モデル上のリモート求人フラグ",
+    "note": "",
+    "confidence": "高"
+  },
+  "詳細HiringEvent": {
+    "rawKey": "isHiringEvent",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "詳細モデル上のIndeed Hiring Eventフラグ",
+    "note": "採用イベント機能との紐づきと推定",
+    "confidence": "中"
+  },
+  "インターン求人": {
+    "rawKey": "japanInternshipJob",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "日本向けインターン求人フラグ",
+    "note": "",
+    "confidence": "高"
+  },
+  "会社名": {
+    "rawKey": "jobInfoHeaderModel.companyName / semantic company-name",
+    "source": "詳細 _initialData/semantic",
+    "type": "文字列",
+    "meaning": "求人の会社名",
+    "note": "",
+    "confidence": "高"
+  },
+  "求人本文内企業名": {
+    "rawKey": "semantic label:company-name / 本文見出し",
+    "source": "semantic/本文分解",
+    "type": "文字列",
+    "meaning": "求人本文側で抽出された企業名",
+    "note": "ヘッダー会社名と異なる場合の比較用",
+    "confidence": "高"
+  },
+  "親会社名": {
+    "rawKey": "jobInfoHeaderModel.parentCompanyName",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "Indeedモデル上の親会社名",
+    "note": "",
+    "confidence": "高"
+  },
+  "会社ページURL": {
+    "rawKey": "jobInfoHeaderModel.companyOverviewLink",
+    "source": "詳細 _initialData",
+    "type": "URL",
+    "meaning": "Indeed会社ページURL",
+    "note": "追跡パラメータを除去",
+    "confidence": "高"
+  },
+  "会社口コミURL": {
+    "rawKey": "companyReviewLink / companyReviewModel.*CompanyLink",
+    "source": "詳細 _initialData",
+    "type": "URL",
+    "meaning": "Indeed会社口コミページURL",
+    "note": "追跡パラメータを除去",
+    "confidence": "高"
+  },
+  "企業評価": {
+    "rawKey": "companyReviewModel.rating 等",
+    "source": "詳細 _initialData",
+    "type": "数値",
+    "meaning": "Indeed上の企業評価値",
+    "note": "",
+    "confidence": "高"
+  },
+  "企業口コミ件数": {
+    "rawKey": "companyReviewModel.count 等",
+    "source": "詳細 _initialData",
+    "type": "整数",
+    "meaning": "Indeed上の企業口コミ件数",
+    "note": "",
+    "confidence": "高"
+  },
+  "返信率企業headline": {
+    "rawKey": "responsiveEmployerModel.headline",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "返信率関連の見出し",
+    "note": "",
+    "confidence": "高"
+  },
+  "返信率企業description": {
+    "rawKey": "responsiveEmployerModel.description",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "返信率関連の説明文",
+    "note": "",
+    "confidence": "高"
+  },
+  "responseRate": {
+    "rawKey": "responsiveEmployerModel.responseRate",
+    "source": "詳細 _initialData",
+    "type": "数値",
+    "meaning": "返信率モデルの数値",
+    "note": "現HTMLでは空欄の場合が多い",
+    "confidence": "高"
+  },
+  "averageResponseInDays": {
+    "rawKey": "responsiveEmployerModel.averageResponseInDays",
+    "source": "詳細 _initialData",
+    "type": "数値",
+    "meaning": "平均返信日数",
+    "note": "現HTMLでは空欄の場合が多い",
+    "confidence": "高"
+  },
+  "勤務地表示": {
+    "rawKey": "jobInfoHeaderModel.formattedLocation / jobLocation",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細ページ上の勤務地表示",
+    "note": "",
+    "confidence": "高"
+  },
+  "勤務地完全住所": {
+    "rawKey": "semantic full-address / jobLocation.address.streetAddress",
+    "source": "semantic/JSON-LD",
+    "type": "文字列",
+    "meaning": "取得できる範囲で最も詳細な住所",
+    "note": "semanticを優先",
+    "confidence": "高"
+  },
+  "郵便番号": {
+    "rawKey": "jobLocation.address.postalCode",
+    "source": "JSON-LD JobPosting",
+    "type": "文字列",
+    "meaning": "勤務地郵便番号",
+    "note": "",
+    "confidence": "高"
+  },
+  "都道府県": {
+    "rawKey": "jobLocation.address.addressRegion",
+    "source": "JSON-LD JobPosting",
+    "type": "文字列",
+    "meaning": "勤務地都道府県",
+    "note": "",
+    "confidence": "高"
+  },
+  "市区町村相当": {
+    "rawKey": "jobLocation.address.addressLocality",
+    "source": "JSON-LD JobPosting/派生",
+    "type": "文字列",
+    "meaning": "市区町村相当の住所要素",
+    "note": "東京都で「東京江東区」等になる値は補正",
+    "confidence": "高"
+  },
+  "streetAddress": {
+    "rawKey": "jobLocation.address.streetAddress",
+    "source": "JSON-LD JobPosting",
+    "type": "文字列",
+    "meaning": "JSON-LDのstreetAddress raw値",
+    "note": "semanticの完全住所より粗い場合がある",
+    "confidence": "高"
+  },
+  "国コード": {
+    "rawKey": "jobLocation.address.addressCountry / jobCountry",
+    "source": "JSON-LD/_initialData",
+    "type": "文字列",
+    "meaning": "勤務地の国コード",
+    "note": "",
+    "confidence": "高"
+  },
+  "緯度": {
+    "rawKey": "jobLocation.geo.latitude 等",
+    "source": "JSON-LD JobPosting",
+    "type": "数値",
+    "meaning": "勤務地緯度",
+    "note": "",
+    "confidence": "高"
+  },
+  "経度": {
+    "rawKey": "jobLocation.geo.longitude 等",
+    "source": "JSON-LD JobPosting",
+    "type": "数値",
+    "meaning": "勤務地経度",
+    "note": "",
+    "confidence": "高"
+  },
+  "勤務地備考": {
+    "rawKey": "semantic label:work-location / 本文見出し",
+    "source": "semantic/本文分解",
+    "type": "文字列",
+    "meaning": "勤務地に関する補足",
+    "note": "",
+    "confidence": "高"
+  },
+  "交通アクセス": {
+    "rawKey": "semantic label:commute-info / 本文見出し",
+    "source": "semantic/本文分解",
+    "type": "文字列",
+    "meaning": "交通アクセス情報",
+    "note": "",
+    "confidence": "高"
+  },
+  "給与テキスト": {
+    "rawKey": "salaryInfoModel.salaryText",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細ページ側の給与表示テキスト",
+    "note": "",
+    "confidence": "高"
+  },
+  "給与最小": {
+    "rawKey": "salaryInfoModel.salaryMin / baseSalary.value.minValue",
+    "source": "_initialData/JSON-LD",
+    "type": "数値",
+    "meaning": "給与レンジの最小値",
+    "note": "-1等の負のsentinelは空欄化",
+    "confidence": "高"
+  },
+  "給与最大": {
+    "rawKey": "salaryInfoModel.salaryMax / baseSalary.value.maxValue",
+    "source": "_initialData/JSON-LD",
+    "type": "数値",
+    "meaning": "給与レンジの最大値",
+    "note": "「以上」型で上限不明の場合は空欄",
+    "confidence": "高"
+  },
+  "給与通貨": {
+    "rawKey": "salaryInfoModel.salaryCurrency / baseSalary.currency",
+    "source": "_initialData/JSON-LD",
+    "type": "文字列",
+    "meaning": "給与通貨",
+    "note": "",
+    "confidence": "高"
+  },
+  "給与種別": {
+    "rawKey": "salaryInfoModel.salaryType / baseSalary.value.unitText",
+    "source": "_initialData/JSON-LD",
+    "type": "文字列",
+    "meaning": "時給・月給・年収等の給与単位",
+    "note": "",
+    "confidence": "高"
+  },
+  "給与ソース": {
+    "rawKey": "salaryInfoModel.salarySource",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "給与値のIndeed内部ソース表現",
+    "note": "意味はraw保持を優先",
+    "confidence": "中"
+  },
+  "給与詳細": {
+    "rawKey": "semantic label:pay / 本文見出し",
+    "source": "semantic/本文分解",
+    "type": "文字列",
+    "meaning": "求人本文の給与詳細セクション",
+    "note": "",
+    "confidence": "高"
+  },
+  "給与例": {
+    "rawKey": "semantic label:salary-example / 本文見出し",
+    "source": "semantic/本文分解",
+    "type": "文字列",
+    "meaning": "月収例・年収例など",
+    "note": "",
+    "confidence": "高"
+  },
+  "掲載日時": {
+    "rawKey": "datePosted / datePublished",
+    "source": "JSON-LD/_initialData",
+    "type": "日時",
+    "meaning": "Indeed側で観測できる掲載日時",
+    "note": "再掲載や内部更新の意味までは断定しない",
+    "confidence": "高"
+  },
+  "掲載経過表示": {
+    "rawKey": "jobMetadataFooterModel.age / relativeDate",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "「2日前」等の掲載経過表示",
+    "note": "",
+    "confidence": "高"
+  },
+  "JSON-LD有効期限": {
+    "rawKey": "validThrough",
+    "source": "JSON-LD JobPosting",
+    "type": "日時",
+    "meaning": "JobPosting構造化データの有効期限",
+    "note": "実際の募集締切とは扱わない。取得時点に連動して動くケースを確認",
+    "confidence": "高"
+  },
+  "募集終了判定": {
+    "rawKey": "expiredJobMetadataModel / showExpiredHeader",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "Indeed詳細ページで募集終了状態が示されているか",
+    "note": "",
+    "confidence": "高"
+  },
+  "Indeed掲載ソース": {
+    "rawKey": "jobMetadataFooterModel.source",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "Indeed詳細下部等で示される掲載元/ソース",
+    "note": "ATS・求人媒体比較に有用",
+    "confidence": "高"
+  },
+  "originalJobLink": {
+    "rawKey": "jobMetadataFooterModel.originalJobLink / originalJobLinkModel",
+    "source": "詳細 _initialData",
+    "type": "URL",
+    "meaning": "元求人・掲載元へのリンク",
+    "note": "HTMLに露出しない求人では空欄",
+    "confidence": "高"
+  },
+  "IndeedApply有無": {
+    "rawKey": "indeedApplyButtonContainer.*",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "Indeed上の応募ボタン情報が存在するか",
+    "note": "",
+    "confidence": "高"
+  },
+  "directApply": {
+    "rawKey": "directApply",
+    "source": "JSON-LD JobPosting",
+    "type": "真偽値",
+    "meaning": "JSON-LD上のdirectApplyフラグ",
+    "note": "",
+    "confidence": "高"
+  },
+  "Applyボタン種別": {
+    "rawKey": "indeedApplyButtonModel.buttonType",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "応募ボタン種別",
+    "note": "",
+    "confidence": "高"
+  },
+  "Apply表示テキスト": {
+    "rawKey": "indeedApplyButtonModel.contentHtml",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "応募ボタンに表示される文言",
+    "note": "HTMLタグ除去後",
+    "confidence": "高"
+  },
+  "求人写真数": {
+    "rawKey": "japanJobPhotosModel.urls.length",
+    "source": "詳細 _initialData/派生",
+    "type": "整数",
+    "meaning": "求人写真URLの件数",
+    "note": "",
+    "confidence": "高"
+  },
+  "求人写真URL一覧": {
+    "rawKey": "japanJobPhotosModel.urls[]",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "求人写真URL一覧",
+    "note": "",
+    "confidence": "高"
+  },
+  "求人写真alt一覧": {
+    "rawKey": "japanJobPhotosModel.altTexts[]",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "求人写真altテキスト一覧",
+    "note": "",
+    "confidence": "高"
+  },
+  "企業ロゴURL": {
+    "rawKey": "companyImages.logoUrl",
+    "source": "詳細 _initialData",
+    "type": "URL",
+    "meaning": "企業ロゴ画像URL",
+    "note": "",
+    "confidence": "高"
+  },
+  "企業ヘッダー画像URL": {
+    "rawKey": "companyImages.headerImageUrl",
+    "source": "詳細 _initialData",
+    "type": "URL",
+    "meaning": "企業ヘッダー画像URL",
+    "note": "",
+    "confidence": "高"
+  },
+  "Indeed表示タグ": {
+    "rawKey": "jobInfoModel.jobTagModel.tags[]",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "詳細ページ上のIndeed表示タグ",
+    "note": "occupation/attributeとは別",
+    "confidence": "高"
+  },
+  "jobOccupations ID一覧": {
+    "rawKey": "jobOccupations[]",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "求人に紐づく内部occupation ID一覧",
+    "note": "ラベルとの対応が常に露出するとは限らない",
+    "confidence": "中"
+  },
+  "Indeed職種分類名一覧": {
+    "rawKey": "oneGraphMatchComparison.occupationComparisons[].occupation.label",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "Indeed occupation taxonomy上の職種分類名",
+    "note": "投稿側指定またはIndeed側付与の可能性がある",
+    "confidence": "高"
+  },
+  "Indeed職種分類ID一覧": {
+    "rawKey": "oneGraphMatchComparison.occupationComparisons[].occupation.suid",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "職種分類のSUID一覧",
+    "note": "分類名と同順",
+    "confidence": "高"
+  },
+  "occupationComparison JSON": {
+    "rawKey": "oneGraphMatchComparison.occupationComparisons[]",
+    "source": "OneGraph埋込データ",
+    "type": "JSON",
+    "meaning": "occupation比較情報のraw保持",
+    "note": "matchType/jsProvenance等を含む",
+    "confidence": "高"
+  },
+  "Indeed抽出属性名一覧": {
+    "rawKey": "oneGraphMatchComparison.attributeComparisons[].attribute.label",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "Indeed求人属性/求人タグ相当の名称一覧",
+    "note": "投稿側設定とIndeed自動抽出の両方があり得る。名称は互換性のため維持",
+    "confidence": "高"
+  },
+  "Indeed抽出属性ID一覧": {
+    "rawKey": "oneGraphMatchComparison.attributeComparisons[].attribute.suid",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "Indeed求人属性のSUID一覧",
+    "note": "投稿側設定と自動抽出の両方があり得る",
+    "confidence": "高"
+  },
+  "属性タイプID一覧": {
+    "rawKey": "attributeComparisons[].attribute.profileAttributeTypeSuid",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "属性が属するプロフィール属性タイプSUID",
+    "note": "",
+    "confidence": "高"
+  },
+  "jobProvenance一覧": {
+    "rawKey": "attributeComparisons[].jobProvenance",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "求人側属性の由来を示すraw値一覧",
+    "note": "EXTRACTED等。厳密な全enum意味はraw保持",
+    "confidence": "高"
+  },
+  "jobRequirementStrength一覧": {
+    "rawKey": "attributeComparisons[].jobRequirementStrength",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "求人要件としての強度を示すraw値一覧",
+    "note": "NONE等。厳密な全enum意味はraw保持",
+    "confidence": "高"
+  },
+  "attributeComparison JSON": {
+    "rawKey": "oneGraphMatchComparison.attributeComparisons[]",
+    "source": "OneGraph埋込データ",
+    "type": "JSON",
+    "meaning": "attribute比較情報のraw保持",
+    "note": "開発・検証用",
+    "confidence": "高"
+  },
+  "jobFlair headline": {
+    "rawKey": "jobFlairModel.headline 等",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "IndeedのjobFlair表示用見出し",
+    "note": "意味は表示実験・機能に依存する可能性",
+    "confidence": "中"
+  },
+  "jobFlair description": {
+    "rawKey": "jobFlairModel.description 等",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "IndeedのjobFlair表示用説明",
+    "note": "",
+    "confidence": "高"
+  },
+  "jobFlair eligible": {
+    "rawKey": "jobFlairModel.eligible 等",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "jobFlair対象可否フラグ",
+    "note": "",
+    "confidence": "高"
+  },
+  "Indeed関連検索what": {
+    "rawKey": "related search links/query model の what",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "詳細下部の関連検索what候補",
+    "note": "同一jobKey照合で職種候補が旧normalizedtitleとほぼ完全一致。企業名候補等も混在する",
+    "confidence": "高"
+  },
+  "Indeed関連検索where": {
+    "rawKey": "related search links/query model の where",
+    "source": "詳細 _initialData",
+    "type": "配列(::)",
+    "meaning": "詳細下部の関連検索where候補",
+    "note": "同一求人では検索元キーワードによらず安定する傾向を観測",
+    "confidence": "高"
+  },
+  "本文全文": {
+    "rawKey": "jobInfoModel.sanitizedJobDescription / #jobDescriptionText",
+    "source": "詳細 _initialData/DOM",
+    "type": "文字列",
+    "meaning": "求人本文全文",
+    "note": "semanticが無くても本文自体は取得可能",
+    "confidence": "高"
+  },
+  "仕事内容": {
+    "rawKey": "semanticSegmentModels / 本文見出し「仕事内容」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "仕事内容セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "求めている人材": {
+    "rawKey": "semanticSegmentModels / 本文見出し「応募資格」等",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "応募資格・求める人材セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "勤務時間詳細": {
+    "rawKey": "semanticSegmentModels / 本文見出し「勤務時間」等",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "勤務時間セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "勤務形態": {
+    "rawKey": "semanticSegmentModels / 本文見出し「勤務形態」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "勤務形態セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "休日休暇": {
+    "rawKey": "semanticSegmentModels / 本文見出し「休日・休暇」等",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "休日・休暇セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "勤務地所在地": {
+    "rawKey": "semantic full-address / 本文見出し「勤務地」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "勤務地所在地セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "試用期間": {
+    "rawKey": "semanticSegmentModels / 本文見出し「試用期間」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "試用期間セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "待遇福利厚生": {
+    "rawKey": "semanticSegmentModels / 本文見出し「待遇・福利厚生」等",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "待遇・福利厚生セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "社会保険": {
+    "rawKey": "semanticSegmentModels / 本文見出し「社会保険」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "社会保険セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "職場環境": {
+    "rawKey": "semanticSegmentModels / 本文見出し「職場環境」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "職場環境セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "PR・アピール情報": {
+    "rawKey": "semanticLabel=employer-message / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "PR・アピール情報",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "応募方法": {
+    "rawKey": "semanticSegmentModels / 本文見出し「応募方法」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "応募方法セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "選考プロセス": {
+    "rawKey": "semanticSegmentModels / 本文見出し「選考手順」等",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "応募後・選考プロセス",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "その他": {
+    "rawKey": "semanticSegmentModels / 本文見出し「その他」",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "その他セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "企業名詳細": {
+    "rawKey": "semantic label:company-name / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "本文内企業名セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "本社所在地": {
+    "rawKey": "semantic label:company-location / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "本社所在地セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "業種": {
+    "rawKey": "semantic label:company-industry / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "業種セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "代表者名": {
+    "rawKey": "semantic label:company-president / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "代表者名セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "代表電話番号": {
+    "rawKey": "semantic label:contact-tel / 本文見出し",
+    "source": "semantic/本文見出しフォールバック",
+    "type": "文字列",
+    "meaning": "代表電話番号セクション",
+    "note": "semanticSegmentModelsを優先し、無い場合のみ明示見出し辞書で分解",
+    "confidence": "高"
+  },
+  "semanticSegments JSON": {
+    "rawKey": "semanticSegmentModels[]",
+    "source": "詳細 _initialData",
+    "type": "JSON",
+    "meaning": "semantic segmentsのraw保持",
+    "note": "開発・検証用",
+    "confidence": "高"
+  },
+  "本文セクション分解ソース": {
+    "rawKey": "（派生）semantic / explicit-heading / none",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "本文の項目分解に何を使ったか",
+    "note": "semantic優先",
+    "confidence": "高"
+  },
+  "本文見出し抽出一覧": {
+    "rawKey": "sanitizedJobDescription内の明示見出し",
+    "source": "本文解析/派生",
+    "type": "配列(::)",
+    "meaning": "本文見出しフォールバックで検出した見出し一覧",
+    "note": "媒体差分の監視用",
+    "confidence": "高"
+  },
+  "本文見出し未対応一覧": {
+    "rawKey": "検出見出し - SECTION_MAP対応済み",
+    "source": "本文解析/派生",
+    "type": "配列(::)",
+    "meaning": "辞書に未登録だった本文見出し一覧",
+    "note": "新媒体対応の追加候補を発見する診断列",
+    "confidence": "高"
+  },
+  "recentQueryString": {
+    "rawKey": "recentQueryString",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細ページモデルに残る直近検索文字列",
+    "note": "ユーザー検索文脈。求人固有属性ではない",
+    "confidence": "高"
+  },
+  "詳細到達検索what": {
+    "rawKey": "recentApplySearch.what 等",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細到達時の検索what文脈",
+    "note": "ユーザー行動系",
+    "confidence": "高"
+  },
+  "詳細到達検索where": {
+    "rawKey": "recentApplySearch.where 等",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "詳細到達時の検索where文脈",
+    "note": "ユーザー行動系",
+    "confidence": "高"
+  },
+  "currentJobState": {
+    "rawKey": "saveJobButtonContainerModel.currentJobState",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "保存求人等の現在状態",
+    "note": "ログインユーザー依存",
+    "confidence": "高"
+  },
+  "resume trafficLight": {
+    "rawKey": "resumeEvaluationResult.trafficLightSignal",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "履歴書評価系のtrafficLight raw値",
+    "note": "ユーザー依存。意味を断定しない",
+    "confidence": "中"
+  },
+  "encouragement trafficLight": {
+    "rawKey": "oneGraphMatchComparison.encouragementToApply.trafficLight",
+    "source": "OneGraph埋込データ",
+    "type": "文字列",
+    "meaning": "応募促進判定のtrafficLight raw値",
+    "note": "ユーザー依存の可能性が高い",
+    "confidence": "中"
+  },
+  "encouragement score": {
+    "rawKey": "oneGraphMatchComparison.encouragementToApply.score",
+    "source": "OneGraph埋込データ",
+    "type": "数値",
+    "meaning": "応募促進判定のscore raw値",
+    "note": "アルゴリズム意味は非公開",
+    "confidence": "中"
+  },
+  "encouragement strategy": {
+    "rawKey": "oneGraphMatchComparison.encouragementToApply.strategy",
+    "source": "OneGraph埋込データ",
+    "type": "文字列",
+    "meaning": "応募促進判定のstrategy raw値",
+    "note": "アルゴリズム意味は非公開",
+    "confidence": "中"
+  },
+  "matchingSalary": {
+    "rawKey": "salaryInfoModel.matchingSalary",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "給与がユーザー条件とマッチするかを示す可能性のあるフラグ",
+    "note": "ユーザー依存",
+    "confidence": "中"
+  },
+  "minimumPayPreferencePresent": {
+    "rawKey": "salaryInfoModel.minimumPayPreferencePresent",
+    "source": "詳細 _initialData",
+    "type": "真偽値",
+    "meaning": "ユーザー最低希望給与設定の有無",
+    "note": "ユーザー依存",
+    "confidence": "高"
+  },
+  "userMinimumPayAmount": {
+    "rawKey": "salaryInfoModel.userMinimumPayAmount",
+    "source": "詳細 _initialData",
+    "type": "数値",
+    "meaning": "ユーザー最低希望給与額",
+    "note": "ユーザー依存。営業用では非出力",
+    "confidence": "高"
+  },
+  "userMinimumPaySalaryType": {
+    "rawKey": "salaryInfoModel.userMinimumPaySalaryType",
+    "source": "詳細 _initialData",
+    "type": "文字列",
+    "meaning": "ユーザー最低希望給与の給与種別",
+    "note": "ユーザー依存",
+    "confidence": "高"
+  },
+  "attribute matchType一覧": {
+    "rawKey": "attributeComparisons[].matchType",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "attribute比較のmatchType raw値",
+    "note": "JOB_ONLY等。厳密な意味はraw保持",
+    "confidence": "中"
+  },
+  "attribute jsProvenance一覧": {
+    "rawKey": "attributeComparisons[].jsProvenance",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "attribute比較のjsProvenance raw値",
+    "note": "厳密な意味はraw保持",
+    "confidence": "中"
+  },
+  "occupation matchType一覧": {
+    "rawKey": "occupationComparisons[].matchType",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "occupation比較のmatchType raw値",
+    "note": "JOB_ONLY等。厳密な意味はraw保持",
+    "confidence": "中"
+  },
+  "occupation jsProvenance一覧": {
+    "rawKey": "occupationComparisons[].jsProvenance",
+    "source": "OneGraph埋込データ",
+    "type": "配列(::)",
+    "meaning": "occupation比較のjsProvenance raw値",
+    "note": "厳密な意味はraw保持",
+    "confidence": "中"
+  },
+  "userContext JSON": {
+    "rawKey": "ユーザー文脈関連フィールドから派生",
+    "source": "詳細 _initialData/派生",
+    "type": "JSON",
+    "meaning": "検索・給与希望・マッチング等のユーザー文脈をまとめたraw JSON",
+    "note": "営業用では非出力。個人識別情報は意図的に含めない",
+    "confidence": "高"
+  },
+  "取得ステータス": {
+    "rawKey": "（派生）major fields取得数",
+    "source": "Indeed Helper",
+    "type": "列挙",
+    "meaning": "OK/PARTIAL/ERROR",
+    "note": "スクリプト独自判定",
+    "confidence": "高"
+  },
+  "取得エラー理由": {
+    "rawKey": "（派生）解析/取得エラー",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "ERROR/PARTIALの理由",
+    "note": "",
+    "confidence": "高"
+  },
+  "詳細取得ソース": {
+    "rawKey": "（派生）current-_initialData / error 等",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "どの解析経路で詳細データを取得したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "_initialData有無": {
+    "rawKey": "window._initialData / candidate roots",
+    "source": "詳細HTML/派生",
+    "type": "真偽値",
+    "meaning": "解析可能な_initialData系rootが存在したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "jobInfoWrapperModel有無": {
+    "rawKey": "jobInfoWrapperModel",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "jobInfoWrapperModelが存在したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "salaryInfoModel有無": {
+    "rawKey": "salaryInfoModel",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "salaryInfoModelが存在したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "semanticSegmentModels有無": {
+    "rawKey": "semanticSegmentModels",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "semanticSegmentModelsが存在したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "JSON-LD JobPosting有無": {
+    "rawKey": "script[type=application/ld+json] JobPosting",
+    "source": "詳細HTML/派生",
+    "type": "真偽値",
+    "meaning": "JSON-LD JobPostingを取得できたか",
+    "note": "",
+    "confidence": "高"
+  },
+  "oneGraphMatchComparison有無": {
+    "rawKey": "oneGraphMatchComparison",
+    "source": "詳細 _initialData/派生",
+    "type": "真偽値",
+    "meaning": "OneGraph比較データが存在したか",
+    "note": "",
+    "confidence": "高"
+  },
+  "主要項目取得数": {
+    "rawKey": "（派生）majorFields",
+    "source": "Indeed Helper",
+    "type": "整数",
+    "meaning": "主要項目の取得数",
+    "note": "取得ステータス判定に使用",
+    "confidence": "高"
+  },
+  "全項目取得数": {
+    "rawKey": "（派生）HEADERS非空セル数",
+    "source": "Indeed Helper",
+    "type": "整数",
+    "meaning": "診断列を除く取得済み項目数",
+    "note": "",
+    "confidence": "高"
+  },
+  "取得スキーマVersion": {
+    "rawKey": "SCHEMA_VERSION",
+    "source": "Indeed Helper",
+    "type": "文字列",
+    "meaning": "このレコードを生成したスキーマバージョン",
+    "note": "",
+    "confidence": "高"
+  }
+});
+
+
   // 営業ユーザー向け。技術診断・JSON・ユーザー行動系を除き、競合原稿調査に必要な求人情報へ絞る。
   const SALES_RESEARCH_HEADERS = [
+    '詳細取得日時',
     '検索キーワード',
     '検索勤務地',
+    '検索半径',
     '検索内通し順位（観測）',
     '検索ページ番号',
     'ページ内表示順',
-    '求人キー',
+    '取得URL',
     '求人タイトル',
     'normalizedtitle相当',
     'Indeed職種分類名一覧',
@@ -207,6 +1513,7 @@
     'Indeed関連検索what（raw）',
     '関連検索what補助候補',
     '会社名',
+    '求人本文内企業名',
     '勤務地表示',
     '雇用形態表示',
     '給与テキスト',
@@ -223,16 +1530,40 @@
     '仕事内容',
     '求めている人材',
     '勤務時間詳細',
+    '勤務形態',
     '休日休暇',
     '給与詳細',
+    '試用期間',
     '待遇福利厚生',
     '職場環境',
     'PR・アピール情報',
+    '応募方法',
+    '選考プロセス',
+    'その他',
     '検索語一致タイプ',
     'タイトル検索語一致',
     'normalizedtitle相当検索語一致',
     'Indeed職種分類検索語一致',
-    '仕事内容検索語一致'
+    '仕事内容検索語一致',
+    'リモート求人',
+    'インターン求人',
+    '検索結果リンク種別',
+    '勤務地備考',
+    '交通アクセス',
+    '郵便番号',
+    '都道府県',
+    '市区町村相当',
+    '緯度',
+    '経度',
+    '給与種別',
+    '給与最小',
+    '給与最大',
+    '本社所在地',
+    '業種',
+    '代表者名',
+    '代表電話番号',
+    '会社ページURL',
+    '会社口コミURL'
   ];
 
   // フルTSVとは別に、検索語と表示求人の関係を確認しやすい分析ビューを出力する。
@@ -1281,7 +2612,7 @@
     record['雇用形態表示'] = body?.jobInfoWrapperModel?.jobInfoModel?.jobMetadataHeaderModel?.jobType || sectioned?.formattedJobTypes?.content || '';
     record['雇用形態コード'] = Array.isArray(ld?.employmentType) ? joinValues(ld.employmentType) : (ld?.employmentType || '');
     record['リモート求人'] = boolText(header.remoteLocation ?? body.remoteLocation);
-    record['HiringEvent'] = boolText(body.isHiringEvent);
+    record['詳細HiringEvent'] = boolText(body.isHiringEvent);
     record['インターン求人'] = boolText(body.japanInternshipJob);
 
     record['会社名'] = header.companyName || semanticCompanyName || '';
@@ -1319,7 +2650,7 @@
 
     record['掲載日時'] = formatDateTime(ld?.datePosted || body.datePublished || root.datePublished);
     record['掲載経過表示'] = footer.age || footer.relativeDate || '';
-    record['募集期限'] = formatDateTime(ld?.validThrough);
+    record['JSON-LD有効期限'] = formatDateTime(ld?.validThrough);
     record['募集終了判定'] = boolText(Boolean(jobInfoModel.expiredJobMetadataModel || jobInfoModel.showExpiredHeader || body.showExpiredHeader));
     record['Indeed掲載ソース'] = footer.source || '';
     record['originalJobLink'] = getUrlLike(footer.originalJobLink || body.originalJobLinkModel || body.originalJobLink);
@@ -2240,6 +3571,26 @@
     return buildProjectedTsv(SEARCH_MATCH_ANALYSIS_HEADERS, getSearchDerivedRows(), includeHeader);
   }
 
+  function buildFieldDefinitionTsv(includeHeader = true) {
+    const rows = HEADERS.map((header, index) => {
+      const def = FIELD_DEFINITION_MAP[header] || {};
+      return [
+        String(index + 1),
+        header,
+        def.rawKey || '',
+        def.source || '',
+        def.type || '',
+        def.meaning || '',
+        def.note || '',
+        def.confidence || ''
+      ];
+    });
+    const lines = rows.map(row => row.map(toTsvCell).join('\t'));
+    return includeHeader
+      ? `${FIELD_DEFINITION_HEADERS.join('\t')}\n${lines.join('\n')}`
+      : lines.join('\n');
+  }
+
   function buildErrorUrlText() {
     const state = loadBatchState();
     return state.items
@@ -2527,6 +3878,17 @@
     }
   }
 
+  async function copyFieldDefinitions() {
+    const tsv = buildFieldDefinitionTsv(true);
+    const ok = await copyText(tsv);
+    if (ok) {
+      setBatchStatus(`項目定義TSVをコピーしました（${HEADERS.length}項目）`);
+    } else {
+      console.log(tsv);
+      setBatchStatus('項目定義TSVのコピーに失敗。コンソールへ出力しました', true);
+    }
+  }
+
   function downloadBatchResults() {
     const tsv = buildBatchTsv(true);
     if (!tsv) {
@@ -2639,7 +4001,7 @@
       '検索時会社名': cardText(cardEl, '[data-testid="company-name"]'),
       '検索時勤務地': cardText(cardEl, '[data-testid="text-location"]'),
       '検索時給与': salaryText,
-      '検索時雇用形態': employmentCandidates[0] || '',
+      '検索時求人メタ表示': employmentCandidates[0] || '',
       '検索時タグ': joinValues(tags),
       '検索時スニペット': snippet,
       '検索時会社評価': rating,
@@ -3543,6 +4905,10 @@
             <div class="tm-buttons" style="margin-top:8px;">
               <button class="btn-batch-copy tm-muted">フルデータTSVをコピー</button>
             </div>
+            <div class="tm-buttons" style="margin-top:8px;">
+              <button class="btn-field-def-copy tm-muted">項目定義TSVをコピー</button>
+            </div>
+            <div class="tm-sub">フルTSV各列の元key・取得元・意味・注意事項・解釈確度を一覧化します。</div>
           </div>
 
           <div class="tm-group tm-detail-only">
@@ -3617,6 +4983,7 @@
     panel.querySelector('.btn-batch-start').addEventListener('click', () => startOrResumeBatch({ forceFromTextarea: true, preferExistingProgress: false, freshSession: true }));
     panel.querySelector('.btn-search-analysis-copy').addEventListener('click', () => copySearchDisplayAnalysis());
     panel.querySelector('.btn-search-match-copy').addEventListener('click', () => copySearchMatchAnalysis());
+    panel.querySelector('.btn-field-def-copy').addEventListener('click', () => copyFieldDefinitions());
     panel.querySelector('.btn-batch-download').addEventListener('click', () => downloadBatchResults());
     panel.querySelector('.btn-error-copy').addEventListener('click', () => copyErrorUrls());
 
