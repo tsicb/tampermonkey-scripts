@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
-// @description  現行Indeedの検索結果・求人詳細を取得し、営業向け求人調査・検索分析・フルTSVを出力
+// @version      2.3.0
+// @description  現行Indeedの検索結果・求人詳細を取得し、semantic/本文見出しを構造化して営業向け求人調査・検索分析・フルTSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
 // @grant        GM_getValue
@@ -18,11 +18,11 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v4';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v4';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v5';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v5';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v4';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v5';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -157,6 +157,9 @@
     '代表者名',
     '代表電話番号',
     'semanticSegments JSON',
+    '本文セクション分解ソース',
+    '本文見出し抽出一覧',
+    '本文見出し未対応一覧',
     'recentQueryString',
     '詳細到達検索what',
     '詳細到達検索where',
@@ -440,6 +443,271 @@
 
   function cleanHeaderKey(s) {
     return normalizeText(s).replace(/\s+/g, '');
+  }
+
+  // semanticSegmentModels がない媒体・ATS系求人向け。
+  // 本文に明示された見出しだけを標準列へ対応させ、文意からの推測分割は行わない。
+  const BODY_SECTION_ALIASES = {
+    '仕事内容': [
+      '仕事内容', '職務内容', '業務内容', 'お仕事内容', '仕事内容詳細', '職務内容詳細'
+    ],
+    '求めている人材': [
+      '求めている人材', '求める人材', '応募資格', '応募条件', '応募要件', '資格', '必要資格',
+      '対象となる方', '経験・資格', '資格・経験'
+    ],
+    '勤務時間詳細': [
+      '勤務時間詳細', '勤務時間', '就業時間', '勤務時間・曜日', '勤務日時'
+    ],
+    '勤務形態': [
+      '勤務形態', '勤務体系', '勤務形態・シフト'
+    ],
+    '休日休暇': [
+      '休日休暇', '休日・休暇', '休暇・休日', '休日', '休暇'
+    ],
+    '勤務地所在地': [
+      '勤務地所在地', '勤務地', '勤務場所', '就業場所'
+    ],
+    '勤務地備考': [
+      '勤務地備考', '勤務地補足'
+    ],
+    '交通アクセス': [
+      '交通・アクセス', '交通アクセス', 'アクセス', '交通手段'
+    ],
+    '給与詳細': [
+      '給与詳細', '給与', '給与・報酬', '給与・待遇', '賃金', '報酬'
+    ],
+    '給与例': [
+      '給与例', '月収例', '年収例', '収入例'
+    ],
+    '試用期間': [
+      '試用期間', '試用・研修期間', '試用期間・研修期間'
+    ],
+    '待遇福利厚生': [
+      '待遇・福利厚生', '待遇福利厚生', '福利厚生', '待遇', '待遇・諸手当'
+    ],
+    '社会保険': [
+      '社会保険', '加入保険'
+    ],
+    '職場環境': [
+      '職場環境', '職場について', '職場情報'
+    ],
+    'PR・アピール情報': [
+      'アピールポイント', 'PR', 'PRポイント', 'この仕事の魅力', 'おすすめポイント', 'インフォメーション'
+    ],
+    '応募方法': [
+      '応募方法', '応募について', '応募'
+    ],
+    '選考プロセス': [
+      '選考プロセス', '選考手順', '選考の流れ', '応募から採用まで', 'ご応募からの流れ',
+      '応募後の流れ', '面接地'
+    ],
+    'その他': [
+      'その他'
+    ],
+    '企業名詳細': [
+      '企業名', '会社名', '勤務先名', '社名'
+    ],
+    '本社所在地': [
+      '本社所在地', '会社所在地'
+    ],
+    '業種': [
+      '業種'
+    ],
+    '代表者名': [
+      '代表者名', '代表者'
+    ],
+    '代表電話番号': [
+      '代表電話番号', 'お問い合わせ電話番号', '電話番号'
+    ]
+  };
+
+  function normalizeBodyHeading(value) {
+    return textify(value)
+      .normalize('NFKC')
+      .replace(/^\s*[\[［【〔＜<]\s*/, '')
+      .replace(/\s*[\]］】〕＞>]\s*$/, '')
+      .replace(/[：:]\s*$/, '')
+      .replace(/[\s　]+/g, '')
+      .trim();
+  }
+
+  const BODY_SECTION_ALIAS_LOOKUP = (() => {
+    const map = new Map();
+    for (const [canonical, aliases] of Object.entries(BODY_SECTION_ALIASES)) {
+      for (const alias of aliases) {
+        const key = normalizeBodyHeading(alias);
+        if (key && !map.has(key)) map.set(key, canonical);
+      }
+    }
+    return map;
+  })();
+
+  const BODY_SECTION_HEADING_PATTERNS = [
+    { pattern: /選ばれる理由/, canonical: 'PR・アピール情報' }
+  ];
+
+  function lookupBodySectionCanonical(heading) {
+    const key = normalizeBodyHeading(heading || '');
+    if (!key) return '';
+    const exact = BODY_SECTION_ALIAS_LOOKUP.get(key);
+    if (exact) return exact;
+    for (const rule of BODY_SECTION_HEADING_PATTERNS) {
+      if (rule.pattern.test(key)) return rule.canonical;
+    }
+    return '';
+  }
+
+  function getFallbackBodyHtml(jobInfoModel, ld) {
+    if (jobInfoModel?.sanitizedJobDescription) {
+      return { html: String(jobInfoModel.sanitizedJobDescription), source: 'sanitizedJobDescription見出し' };
+    }
+    if (ld?.description) {
+      return { html: String(ld.description), source: 'JSON-LD description見出し' };
+    }
+    const dom = document.querySelector('#jobDescriptionText');
+    if (dom?.innerHTML) {
+      return { html: dom.innerHTML, source: 'DOM#jobDescriptionText見出し' };
+    }
+    return { html: '', source: '' };
+  }
+
+  function bodyHtmlToMarkedText(html) {
+    if (!html) return '';
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    const body = doc.body;
+    if (!body) return '';
+
+    const markerPrefix = '__TM_IH_HEADING__';
+    const markerSuffix = '__TM_IH_END_HEADING__';
+
+    body.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(el => {
+      const heading = normalizeText(el.textContent || '');
+      const marker = heading ? `\n${markerPrefix}${heading}${markerSuffix}\n` : '\n';
+      el.replaceWith(doc.createTextNode(marker));
+    });
+    body.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+    body.querySelectorAll('p,div,li,tr,section').forEach(el => {
+      if (el.nextSibling) el.appendChild(doc.createTextNode('\n'));
+    });
+
+    return normalizeMultiline(body.textContent || '');
+  }
+
+  function parseExplicitHeadingLine(line) {
+    const raw = String(line || '').trim();
+    if (!raw) return null;
+
+    const marker = raw.match(/^__TM_IH_HEADING__(.*?)__TM_IH_END_HEADING__\s*(.*)$/);
+    if (marker) {
+      const heading = normalizeText(marker[1] || '');
+      return { heading, remainder: normalizeMultiline(marker[2] || ''), explicit: true };
+    }
+
+    // [見出し] / ［見出し］ は媒体側の大区分として使われやすいため、
+    // 未対応見出しでも前セクションを終える境界として扱う。
+    const square = raw.match(/^\s*[\[［]\s*([^\]］]{1,60}?)\s*[\]］]\s*(?:[：:]\s*)?(.*)$/);
+    if (square) {
+      return {
+        heading: normalizeText(square[1] || ''),
+        remainder: normalizeMultiline(square[2] || ''),
+        explicit: true,
+        boundaryIfUnmapped: true
+      };
+    }
+
+    // 【...】/＜...＞/〔...〕 は、会社名・小見出し・装飾にも頻繁に使われる。
+    // 辞書に登録済みの見出しだけをセクション境界として扱い、未知のものは本文として残す。
+    const decorated = raw.match(/^\s*(?:【\s*([^】]{1,60}?)\s*】|＜\s*([^＞]{1,60}?)\s*＞|<\s*([^>]{1,60}?)\s*>|〔\s*([^〕]{1,60}?)\s*〕)\s*(?:[：:]\s*)?(.*)$/);
+    if (decorated) {
+      const heading = normalizeText(decorated[1] || decorated[2] || decorated[3] || decorated[4] || '');
+      if (lookupBodySectionCanonical(heading)) {
+        return {
+          heading,
+          remainder: normalizeMultiline(decorated[5] || ''),
+          explicit: true,
+          boundaryIfUnmapped: false
+        };
+      }
+    }
+
+    // 「給与: ～」のような形式は、辞書に存在する見出しだけを認識する。
+    const colon = raw.match(/^([^：:]{1,40})\s*[：:]\s*(.*)$/);
+    if (colon && lookupBodySectionCanonical(colon[1] || '')) {
+      return {
+        heading: normalizeText(colon[1] || ''),
+        remainder: normalizeMultiline(colon[2] || ''),
+        explicit: true
+      };
+    }
+
+    return null;
+  }
+
+  function extractExplicitBodySections(html) {
+    const markedText = bodyHtmlToMarkedText(html);
+    const partsByCanonical = new Map();
+    const rawHeaders = [];
+    const unmappedHeaders = [];
+    let current = null;
+
+    function finishCurrent() {
+      if (!current?.canonical) {
+        current = null;
+        return;
+      }
+      const content = normalizeMultiline(current.lines.join('\n'));
+      if (content) {
+        if (!partsByCanonical.has(current.canonical)) partsByCanonical.set(current.canonical, []);
+        partsByCanonical.get(current.canonical).push({ header: current.header, content });
+      }
+      current = null;
+    }
+
+    for (const rawLine of markedText.split('\n')) {
+      const line = String(rawLine || '').trim();
+      if (!line) {
+        if (current?.canonical && current.lines.length && current.lines[current.lines.length - 1] !== '') {
+          current.lines.push('');
+        }
+        continue;
+      }
+
+      const headingInfo = parseExplicitHeadingLine(line);
+      if (headingInfo) {
+        finishCurrent();
+        const rawHeader = normalizeText(headingInfo.heading || '');
+        if (rawHeader) rawHeaders.push(rawHeader);
+        const canonical = lookupBodySectionCanonical(rawHeader);
+        if (!canonical) {
+          if (rawHeader) unmappedHeaders.push(rawHeader);
+          current = null;
+          continue;
+        }
+        current = { canonical, header: rawHeader, lines: [] };
+        if (headingInfo.remainder) current.lines.push(headingInfo.remainder);
+        continue;
+      }
+
+      if (current?.canonical) current.lines.push(line);
+    }
+    finishCurrent();
+
+    const sections = {};
+    for (const [canonical, parts] of partsByCanonical.entries()) {
+      if (parts.length === 1) {
+        sections[canonical] = parts[0].content;
+      } else {
+        sections[canonical] = parts
+          .map(part => part.header ? `【${part.header}】\n${part.content}` : part.content)
+          .join('\n\n');
+      }
+    }
+
+    return {
+      sections,
+      rawHeaders: uniqueStrings(rawHeaders),
+      unmappedHeaders: uniqueStrings(unmappedHeaders)
+    };
   }
 
   function deepFind(root, predicate, maxVisits = 50000) {
@@ -978,6 +1246,12 @@
     const responsive = bundle.employerResponsiveCardModel || {};
     const flair = bundle.jobFlairLabelModel || {};
     const segMap = buildSegmentMap(bundle);
+    const semanticSegments = getSemanticSegments(bundle);
+    const fallbackBody = semanticSegments.length ? { html: '', source: '' } : getFallbackBodyHtml(jobInfoModel, ld);
+    const explicitBody = semanticSegments.length || !fallbackBody.html
+      ? { sections: {}, rawHeaders: [], unmappedHeaders: [] }
+      : extractExplicitBodySections(fallbackBody.html);
+    const bodySection = key => explicitBody.sections[key] || '';
     const { one, attrs, occs } = comparisonData(bundle);
     const recentApplySearch = getSearchRecentQuery(body);
     const ratings = header.ratingsModel || {};
@@ -992,7 +1266,8 @@
     const ldSalary = ld?.baseSalary || {};
     const ldSalaryValue = ldSalary?.value || {};
     const semanticFullAddress = pickSegment(segMap, ['勤務地所在地', 'label:full-address']);
-    const semanticCompanyName = pickSegment(segMap, ['企業名', 'label:company-name']);
+    const fallbackLocationSection = bodySection('勤務地所在地');
+    const semanticCompanyName = pickSegment(segMap, ['企業名', 'label:company-name']) || bodySection('企業名詳細');
 
     record['ログイン状態'] = boolText(body.loggedIn ?? root.loggedIn ?? body.saveJobButtonContainerModel?.isLoggedIn);
     record['canonical URL'] = getCanonicalUrl(bundle.jobKey);
@@ -1030,8 +1305,8 @@
     record['国コード'] = address.addressCountry || body.jobCountry || '';
     record['緯度'] = geo.latitude ?? address.latitude ?? ldLocation.latitude ?? '';
     record['経度'] = geo.longitude ?? address.longitude ?? ldLocation.longitude ?? '';
-    record['勤務地備考'] = pickSegment(segMap, ['勤務地備考', 'label:work-location']);
-    record['交通アクセス'] = pickSegment(segMap, ['交通・アクセス', 'label:commute-info']);
+    record['勤務地備考'] = pickSegment(segMap, ['勤務地備考', 'label:work-location']) || bodySection('勤務地備考');
+    record['交通アクセス'] = pickSegment(segMap, ['交通・アクセス', 'label:commute-info']) || bodySection('交通アクセス');
 
     record['給与テキスト'] = salary.salaryText || '';
     record['給与最小'] = normalizeSalaryBound(salary.salaryMin ?? ldSalaryValue.minValue ?? ldSalaryValue.value ?? '');
@@ -1039,8 +1314,8 @@
     record['給与通貨'] = salary.salaryCurrency || ldSalary.currency || '';
     record['給与種別'] = salary.salaryType || ldSalaryValue.unitText || '';
     record['給与ソース'] = salary.salarySource || '';
-    record['給与詳細'] = pickSegment(segMap, ['給与詳細', 'label:pay']);
-    record['給与例'] = pickSegment(segMap, ['給与例', 'label:salary-example']);
+    record['給与詳細'] = pickSegment(segMap, ['給与詳細', 'label:pay']) || bodySection('給与詳細');
+    record['給与例'] = pickSegment(segMap, ['給与例', 'label:salary-example']) || bodySection('給与例');
 
     record['掲載日時'] = formatDateTime(ld?.datePosted || body.datePublished || root.datePublished);
     record['掲載経過表示'] = footer.age || footer.relativeDate || '';
@@ -1096,27 +1371,35 @@
     record['Indeed関連検索what'] = getRelatedLinkValues(body, 'what');
     record['Indeed関連検索where'] = getRelatedLinkValues(body, 'where');
 
-    record['本文全文'] = stripHtml(jobInfoModel.sanitizedJobDescription || ld?.description || '');
-    record['仕事内容'] = pickSegment(segMap, ['仕事内容', 'label:job-description']);
-    record['求めている人材'] = pickSegment(segMap, ['求めている人材', '応募資格', 'label:qualification']);
-    record['勤務時間詳細'] = pickSegment(segMap, ['勤務時間詳細', '勤務時間', 'label:work-hours']);
-    record['勤務形態'] = pickSegment(segMap, ['勤務形態', 'label:working-system']);
-    record['休日休暇'] = pickSegment(segMap, ['休日休暇', 'label:holidays']);
-    record['勤務地所在地'] = semanticFullAddress;
-    record['試用期間'] = pickSegment(segMap, ['試用期間', 'label:probation-conditions']);
-    record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', 'label:benefits']);
-    record['社会保険'] = pickSegment(segMap, ['社会保険', 'label:social-insurance']);
-    record['職場環境'] = pickSegment(segMap, ['職場環境', 'label:work-environment']);
-    record['PR・アピール情報'] = collectSemanticLabelText(bundle, 'employer-message');
-    record['応募方法'] = pickSegment(segMap, ['応募方法', 'label:apply-method']);
-    record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', 'label:apply-info']);
-    record['その他'] = pickSegment(segMap, ['その他', 'label:other']);
+    const fullBodySource = getFallbackBodyHtml(jobInfoModel, ld);
+    record['本文全文'] = stripHtml(fullBodySource.html || '');
+    record['仕事内容'] = pickSegment(segMap, ['仕事内容', 'label:job-description']) || bodySection('仕事内容');
+    record['求めている人材'] = pickSegment(segMap, ['求めている人材', '応募資格', 'label:qualification']) || bodySection('求めている人材');
+    record['勤務時間詳細'] = pickSegment(segMap, ['勤務時間詳細', '勤務時間', 'label:work-hours']) || bodySection('勤務時間詳細');
+    record['勤務形態'] = pickSegment(segMap, ['勤務形態', 'label:working-system']) || bodySection('勤務形態');
+    record['休日休暇'] = pickSegment(segMap, ['休日休暇', 'label:holidays']) || bodySection('休日休暇');
+    record['勤務地所在地'] = semanticFullAddress || fallbackLocationSection;
+    record['試用期間'] = pickSegment(segMap, ['試用期間', 'label:probation-conditions']) || bodySection('試用期間');
+    record['待遇福利厚生'] = pickSegment(segMap, ['待遇・福利厚生', '福利厚生', 'label:benefits']) || bodySection('待遇福利厚生');
+    record['社会保険'] = pickSegment(segMap, ['社会保険', 'label:social-insurance']) || bodySection('社会保険');
+    record['職場環境'] = pickSegment(segMap, ['職場環境', 'label:work-environment']) || bodySection('職場環境');
+    record['PR・アピール情報'] = collectSemanticLabelText(bundle, 'employer-message') || bodySection('PR・アピール情報');
+    record['応募方法'] = pickSegment(segMap, ['応募方法', 'label:apply-method']) || bodySection('応募方法');
+    record['選考プロセス'] = pickSegment(segMap, ['選考プロセス', 'label:apply-info']) || bodySection('選考プロセス');
+    record['その他'] = pickSegment(segMap, ['その他', 'label:other']) || bodySection('その他');
     record['企業名詳細'] = semanticCompanyName;
-    record['本社所在地'] = pickSegment(segMap, ['本社所在地', 'label:company-location']);
-    record['業種'] = pickSegment(segMap, ['業種', 'label:company-industry']);
-    record['代表者名'] = pickSegment(segMap, ['代表者名', 'label:company-president']);
-    record['代表電話番号'] = pickSegment(segMap, ['代表電話番号', 'お問い合わせ電話番号', 'label:contact-tel']);
+    record['本社所在地'] = pickSegment(segMap, ['本社所在地', 'label:company-location']) || bodySection('本社所在地');
+    record['業種'] = pickSegment(segMap, ['業種', 'label:company-industry']) || bodySection('業種');
+    record['代表者名'] = pickSegment(segMap, ['代表者名', 'label:company-president']) || bodySection('代表者名');
+    record['代表電話番号'] = pickSegment(segMap, ['代表電話番号', 'お問い合わせ電話番号', 'label:contact-tel']) || bodySection('代表電話番号');
     record['semanticSegments JSON'] = semanticSegmentsJson(bundle);
+    record['本文セクション分解ソース'] = semanticSegments.length
+      ? 'semanticSegmentModels'
+      : (Object.keys(explicitBody.sections).length ? fallbackBody.source : '');
+    record['本文見出し抽出一覧'] = semanticSegments.length
+      ? joinValues(semanticSegments.map(seg => normalizeText(seg?.header || '')).filter(Boolean))
+      : joinValues(explicitBody.rawHeaders);
+    record['本文見出し未対応一覧'] = semanticSegments.length ? '' : joinValues(explicitBody.unmappedHeaders);
 
     record['recentQueryString'] = body.recentQueryString || '';
     record['詳細到達検索what'] = recentApplySearch.what;
@@ -1151,7 +1434,7 @@
     record['詳細取得ソース'] = bundle.body === root ? 'current-_initialData' : 'current-_initialData-nested';
     record['jobInfoWrapperModel有無'] = boolText(Boolean(body.jobInfoWrapperModel));
     record['salaryInfoModel有無'] = boolText(Boolean(body.salaryInfoModel));
-    record['semanticSegmentModels有無'] = boolText(getSemanticSegments(bundle).length > 0);
+    record['semanticSegmentModels有無'] = boolText(semanticSegments.length > 0);
     record['oneGraphMatchComparison有無'] = boolText(Boolean(bundle.oneGraphMatchComparison));
 
     const majorFields = ['求人キー','求人タイトル','会社名','勤務地表示','雇用形態表示','本文全文'];
@@ -1160,7 +1443,8 @@
 
     const diagnosticKeys = new Set([
       '取得ステータス','取得エラー理由','詳細取得ソース','_initialData有無','jobInfoWrapperModel有無','salaryInfoModel有無',
-      'semanticSegmentModels有無','JSON-LD JobPosting有無','oneGraphMatchComparison有無','主要項目取得数','全項目取得数','取得スキーマVersion'
+      'semanticSegmentModels有無','JSON-LD JobPosting有無','oneGraphMatchComparison有無','本文セクション分解ソース','本文見出し抽出一覧',
+      '本文見出し未対応一覧','主要項目取得数','全項目取得数','取得スキーマVersion'
     ]);
     record['全項目取得数'] = String(HEADERS.filter(k => !diagnosticKeys.has(k) && String(record[k] ?? '').trim() !== '').length);
 
@@ -3420,6 +3704,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.2.0: loaded');
+  console.log('Indeed Helper Batch Export v2.3.0: loaded');
 })();
 
