@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.4.1
+// @version      2.4.2
 // @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -18,11 +18,11 @@
 
   const PANEL_ID = 'tm-indeed-helper-panel';
   const STYLE_ID = 'tm-indeed-helper-style';
-  const BATCH_STATE_KEY = 'tmIndeedBatchState_v6';
-  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v6';
+  const BATCH_STATE_KEY = 'tmIndeedBatchState_v7';
+  const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v7';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
-  const SCHEMA_VERSION = 'indeed-current-2026-09-v6';
+  const SCHEMA_VERSION = 'indeed-current-2026-09-v7';
   const ARRAY_SEP = '::';
   let candidateRootsCache = { url: '', roots: [], checkedAt: 0 };
   let ldJobPostingCache = { url: '', value: null, checkedAt: 0 };
@@ -2377,6 +2377,154 @@
     return joinValues(body.relatedLinks.map(x => x?.[key] || ''));
   }
 
+  // relatedLinks には、職種検索リンク・会社検索リンク・給与リンクなどが混在する。
+  // normalizedtitle相当は「左端のwhat」ではなく、リンクの役割から職種候補を特定する。
+  function normalizeRelatedComparable(value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[\s\u3000]+/g, '')
+      .replace(/[・･·\.．,，、'"“”‘’`´]/g, '')
+      .trim();
+  }
+
+  function normalizeCompanyComparable(value) {
+    return normalizeRelatedComparable(value)
+      .replace(/^(?:株式会社|有限会社|合同会社|合資会社|合名会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|医療法人|社会福祉法人|学校法人|宗教法人|特定非営利活動法人|npo法人|\(株\)|（株）|\(有\)|（有）)+/i, '')
+      .replace(/(?:株式会社|有限会社|合同会社|合資会社|合名会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|医療法人|社会福祉法人|学校法人|宗教法人|特定非営利活動法人|npo法人|\(株\)|（株）|\(有\)|（有）)+$/i, '');
+  }
+
+  function relatedLinkPath(href) {
+    try {
+      return new URL(String(href || ''), 'https://jp.indeed.com').pathname || '';
+    } catch (e) {
+      return String(href || '').split('?')[0] || '';
+    }
+  }
+
+  function isSalaryRelatedLink(link) {
+    const path = relatedLinkPath(link?.href || '');
+    return /(?:^|\/)salary\/?$/i.test(path) || /(?:^|\/)career\/salaries\/?$/i.test(path);
+  }
+
+  function isCompanyRelatedLink(link) {
+    const what = normalizeRelatedComparable(link?.what || '');
+    const where = normalizeRelatedComparable(link?.where || '');
+    const label = normalizeRelatedComparable(link?.linkText || '');
+    if (!what || !label) return false;
+
+    // 現行JP表示例: 「北区 神谷 の アサヌマ の求人」
+    // 空白や全半角差を除去した上で、where→what→求人 の順序を確認する。
+    if (where) {
+      const wherePos = label.indexOf(where);
+      const whatPos = label.indexOf(what);
+      const jobPos = label.lastIndexOf('求人');
+      if (wherePos >= 0 && whatPos > wherePos && jobPos > whatPos) return true;
+    }
+
+    return false;
+  }
+
+  function isOccupationRelatedLink(link) {
+    if (isSalaryRelatedLink(link) || isCompanyRelatedLink(link)) return false;
+    const what = normalizeRelatedComparable(link?.what || '');
+    const label = normalizeRelatedComparable(link?.linkText || '');
+    if (!what || !label) return false;
+
+    // 現行JP表示例: 「2tドライバーの求人 - 北区 神谷」
+    return label.startsWith(`${what}の求人`) || label.startsWith(`${what}求人`);
+  }
+
+  function isKnownCompanyRelatedValue(value, companyNames = []) {
+    const candidate = normalizeCompanyComparable(value);
+    if (!candidate) return false;
+    return companyNames
+      .map(normalizeCompanyComparable)
+      .filter(Boolean)
+      .some(company => candidate === company);
+  }
+
+  function classifyRelatedLinks(body, companyNames = []) {
+    const links = Array.isArray(body?.relatedLinks)
+      ? body.relatedLinks
+          .filter(x => x && x.what)
+          .map(x => ({
+            what: normalizeText(x.what || ''),
+            where: normalizeText(x.where || ''),
+            href: String(x.href || ''),
+            linkText: normalizeText(x.linkText || '')
+          }))
+      : [];
+
+    if (!links.length) {
+      return { normalizedTitleProxy: '', relatedCandidates: '', source: 'none' };
+    }
+
+    const allWhats = uniqueStrings(links.map(x => x.what).filter(Boolean));
+
+    // 最優先: 給与リンクの q1 は、確認済みサンプルでは職種側whatと一致する。
+    const salaryWhats = uniqueStrings(
+      links.filter(isSalaryRelatedLink).map(x => x.what).filter(Boolean)
+    );
+    if (salaryWhats.length) {
+      const title = salaryWhats[0];
+      const aux = allWhats.filter(x => normalizeRelatedComparable(x) !== normalizeRelatedComparable(title));
+      return {
+        normalizedTitleProxy: title,
+        relatedCandidates: aux.join(ARRAY_SEP),
+        source: 'relatedLinks:salary'
+      };
+    }
+
+    // 次点: 「職種の求人 - 地域」という表示構造を持つ検索リンク。
+    const occupationWhats = uniqueStrings(
+      links.filter(isOccupationRelatedLink).map(x => x.what).filter(Boolean)
+    ).filter(x => !isKnownCompanyRelatedValue(x, companyNames));
+    if (occupationWhats.length) {
+      const title = occupationWhats[0];
+      const aux = allWhats.filter(x => normalizeRelatedComparable(x) !== normalizeRelatedComparable(title));
+      return {
+        normalizedTitleProxy: title,
+        relatedCandidates: aux.join(ARRAY_SEP),
+        source: 'relatedLinks:occupation-link'
+      };
+    }
+
+    // company型リンクしか残っていない場合は、旧normalizedtitleの「未分類」相当として空欄にする。
+    const nonCompanyWhats = uniqueStrings(
+      links
+        .filter(x => !isCompanyRelatedLink(x))
+        .map(x => x.what)
+        .filter(Boolean)
+    ).filter(x => !isKnownCompanyRelatedValue(x, companyNames));
+
+    if (!nonCompanyWhats.length) {
+      return {
+        normalizedTitleProxy: '',
+        relatedCandidates: allWhats.join(ARRAY_SEP),
+        source: 'relatedLinks:company-only'
+      };
+    }
+
+    // HTMLパターン変更時の保守的フォールバック。
+    // 会社名一致を除外した残候補が1件だけなら採用し、複数なら誤判定を避けて空欄とする。
+    if (nonCompanyWhats.length === 1) {
+      const title = nonCompanyWhats[0];
+      const aux = allWhats.filter(x => normalizeRelatedComparable(x) !== normalizeRelatedComparable(title));
+      return {
+        normalizedTitleProxy: title,
+        relatedCandidates: aux.join(ARRAY_SEP),
+        source: 'relatedLinks:fallback-single'
+      };
+    }
+
+    return {
+      normalizedTitleProxy: '',
+      relatedCandidates: allWhats.join(ARRAY_SEP),
+      source: 'relatedLinks:ambiguous'
+    };
+  }
+
   function getSearchRecentQuery(body) {
     const raw = body?.indeedApplyButtonContainer?.indeedApplyButtonAttributes?.recentsearchquery || '';
     if (!raw) return { what: '', where: '' };
@@ -2699,8 +2847,17 @@
     record['jobFlair headline'] = flair.headline || '';
     record['jobFlair description'] = flair.description || '';
     record['jobFlair eligible'] = boolText(flair.eligible);
+    const relatedLinkClassification = classifyRelatedLinks(body, [
+      header.companyName || '',
+      semanticCompanyName || '',
+      record['検索時会社名'] || ''
+    ]);
     record['Indeed関連検索what'] = getRelatedLinkValues(body, 'what');
     record['Indeed関連検索where'] = getRelatedLinkValues(body, 'where');
+    // 営業版派生列用の内部値。フルTSVの列数は増やさない。
+    record['_normalizedTitleProxy'] = relatedLinkClassification.normalizedTitleProxy;
+    record['_relatedWhatAuxCandidates'] = relatedLinkClassification.relatedCandidates;
+    record['_normalizedTitleProxySource'] = relatedLinkClassification.source;
 
     const fullBodySource = getFallbackBodyHtml(jobInfoModel, ld);
     record['本文全文'] = stripHtml(fullBodySource.html || '');
@@ -3515,11 +3672,32 @@
     return includeHeader ? `${headers.join('\t')}\n${lines.join('\n')}` : lines.join('\n');
   }
 
-  function splitRelatedWhat(raw) {
+  function splitRelatedWhat(raw, context = {}) {
+    // 新規取得レコードでは、元relatedLinksのhref/linkTextを使った高精度判定を優先する。
+    if (context && Object.prototype.hasOwnProperty.call(context, '_normalizedTitleProxy')) {
+      return {
+        normalizedTitleProxy: context['_normalizedTitleProxy'] || '',
+        relatedCandidates: context['_relatedWhatAuxCandidates'] || '',
+        source: context['_normalizedTitleProxySource'] || 'record-internal'
+      };
+    }
+
+    // 旧保存データ等への互換フォールバック。rawしかないため会社名一致だけを除外する。
     const values = String(raw || '').split(ARRAY_SEP).map(x => x.trim()).filter(Boolean);
+    const companyNames = [
+      context?.['会社名'] || '',
+      context?.['求人本文内企業名'] || '',
+      context?.['検索時会社名'] || '',
+      context?.['企業名詳細'] || ''
+    ];
+    const titleCandidates = values.filter(x => !isKnownCompanyRelatedValue(x, companyNames));
+    const title = titleCandidates[0] || '';
     return {
-      normalizedTitleProxy: values[0] || '',
-      relatedCandidates: values.slice(1).join(ARRAY_SEP)
+      normalizedTitleProxy: title,
+      relatedCandidates: values
+        .filter(x => normalizeRelatedComparable(x) !== normalizeRelatedComparable(title))
+        .join(ARRAY_SEP),
+      source: 'raw-fallback'
     };
   }
 
@@ -3542,7 +3720,7 @@
       const base = item.record;
       const key = String(base['求人キー'] || base['canonical URL'] || base['取得URL'] || '');
       const row = derivedByKey.get(key) || base;
-      const related = splitRelatedWhat(row['Indeed関連検索what']);
+      const related = splitRelatedWhat(row['Indeed関連検索what'], row);
       const query = row['検索キーワード'] || '';
       rows.push(Object.assign({}, row, {
         'normalizedtitle相当': related.normalizedTitleProxy,
