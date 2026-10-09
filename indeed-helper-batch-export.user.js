@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.4.2
+// @version      2.4.3
 // @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -21,6 +21,7 @@
   const BATCH_STATE_KEY = 'tmIndeedBatchState_v7';
   const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v7';
   const PANEL_COLLAPSED_KEY = 'tmIndeedHelperPanelCollapsed_v1';
+  const SEARCH_RANGE_SELECTION_KEY = 'tmIndeedHelperSearchRange_v1';
   const PROFILE_LABEL_KEY = 'tmIndeedHelperProfileLabel_v1';
   const SCHEMA_VERSION = 'indeed-current-2026-09-v7';
   const ARRAY_SEP = '::';
@@ -3235,7 +3236,8 @@
       collectedItems: [],
       visitedPages: [],
       pageCount: 0,
-      maxPages: 0
+      maxPages: 0,
+      searchRange: ''
     };
   }
 
@@ -3899,6 +3901,7 @@
         sessionId,
         crawlStartedAt: startedAt,
         profileLabel,
+        searchRange: '',
         items: itemsFromText
       };
       saveBatchState(newState);
@@ -3949,6 +3952,7 @@
       sessionId: crawlState.sessionId || '',
       crawlStartedAt: crawlState.crawlStartedAt || crawlState.createdAt || '',
       profileLabel: crawlState.profileLabel || '',
+      searchRange: crawlState.mode === 'collect-and-start' ? getCrawlSearchRange(crawlState) : '',
       items
     };
     saveBatchState(newBatchState);
@@ -4408,6 +4412,7 @@
   }
 
   function startCurrentSearchPageFresh() {
+    if (hasActiveWork()) return;
     if (!isSearchResultsPage()) {
       setSearchStatus('検索結果ページで実行してください', true);
       return;
@@ -4444,6 +4449,7 @@
       sessionId,
       crawlStartedAt: startedAt,
       profileLabel,
+      searchRange: 'current',
       items
     });
     refreshBatchInfo();
@@ -4454,8 +4460,9 @@
   }
 
   function startSelectedSearchRange() {
+    if (hasActiveWork()) return;
     const select = document.querySelector(`#${PANEL_ID} .tm-range-select`);
-    const range = select ? select.value : '3';
+    const range = saveSearchRangeSelection(select ? select.value : loadSearchRangeSelection());
     if (range === 'current') {
       startCurrentSearchPageFresh();
       return;
@@ -4465,6 +4472,7 @@
   }
 
   function startFullSearchCrawl(mode, options = {}) {
+    if (hasActiveWork()) return;
     if (!isSearchResultsPage()) {
       setSearchStatus('検索結果ページで実行してください', true);
       return;
@@ -4499,7 +4507,8 @@
       collectedItems: [],
       visitedPages: [],
       pageCount: 0,
-      maxPages: Math.max(0, Number(maxPages) || 0)
+      maxPages: Math.max(0, Number(maxPages) || 0),
+      searchRange: maxPages === 0 ? 'all' : String(maxPages)
     };
 
     saveSearchCrawlState(state);
@@ -4634,12 +4643,15 @@
   }
 
   async function saveCurrentJobAsSingleResult() {
+    if (hasActiveWork() || window.__tmIndeedSingleSaveRunning) return;
     if (isSearchResultsPage() && !location.pathname.includes('/viewjob')) {
       setStatus('求人詳細ページで実行してください', true);
       setBatchStatus('検索結果ページでは「検索結果すべての求人を取得」を使ってください', true);
       return;
     }
 
+    window.__tmIndeedSingleSaveRunning = true;
+    refreshAcquisitionUi();
     try {
       setStatus('表示中の求人データを取得中...');
       setBatchStatus('表示中の求人を取得しています');
@@ -4690,6 +4702,9 @@
       console.error(err);
       setStatus(`表示中の求人取得に失敗: ${err.message || err}`, true);
       setBatchStatus(`表示中の求人取得に失敗: ${err.message || err}`, true);
+    } finally {
+      window.__tmIndeedSingleSaveRunning = false;
+      refreshAcquisitionUi();
     }
   }
 
@@ -4732,6 +4747,97 @@
     try {
       localStorage.setItem(PANEL_COLLAPSED_KEY, collapsed ? 'true' : 'false');
     } catch (e) {}
+  }
+
+  function normalizeSearchRangeSelection(value) {
+    const range = String(value ?? '');
+    return range === 'current' || range === '3' || range === 'all' ? range : '3';
+  }
+
+  function loadSearchRangeSelection() {
+    try {
+      return normalizeSearchRangeSelection(localStorage.getItem(SEARCH_RANGE_SELECTION_KEY));
+    } catch (e) {
+      return '3';
+    }
+  }
+
+  function saveSearchRangeSelection(value) {
+    const range = normalizeSearchRangeSelection(value);
+    try { localStorage.setItem(SEARCH_RANGE_SELECTION_KEY, range); } catch (e) {}
+    return range;
+  }
+
+  function getCrawlSearchRange(crawlState) {
+    // The active crawler's maxPages is authoritative. Do not rely on the
+    // dropdown or a copied string while navigating between result pages.
+    const limit = Number(crawlState?.maxPages);
+    if (crawlState?.maxPages != null && Number.isFinite(limit)) {
+      return limit > 0 ? String(limit) : 'all';
+    }
+    return crawlState?.searchRange || 'all'; // legacy state without maxPages
+  }
+
+  function searchRangeLabel(range) {
+    switch (range) {
+      case 'current': return 'このページだけ';
+      case '3': return '3ページまで';
+      case 'all': return '全ページ';
+      default: return range ? `${range}ページまで` : 'URL指定';
+    }
+  }
+
+  function refreshAcquisitionUi() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+
+    const crawlState = loadSearchCrawlState();
+    const batchState = loadBatchState();
+    const counts = getBatchCounts(batchState);
+    const running = Boolean(crawlState.active || batchState.active);
+    const busy = running || Boolean(window.__tmIndeedSingleSaveRunning);
+    const activeRange = crawlState.active ? getCrawlSearchRange(crawlState)
+      : batchState.active ? (batchState.searchRange || '') : '';
+    const select = panel.querySelector('.tm-range-select');
+    if (select) {
+      // During a crawl, show the *actual persisted execution limit*, not a new-page default.
+      // Otherwise, keep the last user choice even after a page navigation/reload.
+      const selected = ['current', '3', 'all'].includes(activeRange)
+        ? activeRange : loadSearchRangeSelection();
+      if (select.value !== selected) select.value = selected;
+      select.disabled = busy;
+    }
+
+    for (const selector of [
+      '.btn-range-start', '.btn-collect-start', '.btn-collect-all',
+      '.btn-batch-start', '.btn-collect-results', '.btn-single-save', '.btn-batch-clear'
+    ]) {
+      const btn = panel.querySelector(selector);
+      if (btn) btn.disabled = busy;
+    }
+
+    const progress = panel.querySelector('.tm-acquisition-progress');
+    if (!progress) return;
+    let message = '';
+    if (crawlState.active) {
+      const rangeLabel = searchRangeLabel(getCrawlSearchRange(crawlState));
+      const collected = getSearchStateVisibleUrls(crawlState).length;
+      const qualifier = crawlState.mode === 'collect-only' ? '（URL収集のみ）' : '';
+      message = `実行範囲：${rangeLabel}${qualifier}\n検索結果を収集中：${crawlState.pageCount || 0}ページ収集済み / 求人URL ${collected}件`;
+    } else if (batchState.active) {
+      const range = batchState.searchRange;
+      message = `${range ? `実行範囲：${searchRangeLabel(range)}\n` : ''}求人詳細を取得中：${counts.done} / ${counts.total}件完了（失敗${counts.error}件）`;
+    } else if (counts.pending > 0) {
+      const range = batchState.searchRange;
+      message = `${range ? `前回の実行範囲：${searchRangeLabel(range)}\n` : ''}取得停止中：完了${counts.done}件 / 未処理${counts.pending}件 / 失敗${counts.error}件`;
+    } else if (counts.done > 0 || counts.error > 0) {
+      const range = batchState.searchRange;
+      message = `${range ? `前回の実行範囲：${searchRangeLabel(range)}\n` : ''}取得結果：完了${counts.done}件 / 失敗${counts.error}件`;
+    } else if (window.__tmIndeedSingleSaveRunning) {
+      message = '表示中の求人を取得中...';
+    }
+    if (progress.textContent !== message) progress.textContent = message;
+    progress.hidden = !message;
   }
 
   function getCollapsedSummaryText() {
@@ -4916,8 +5022,13 @@
         color: #fff;
         line-height: 1.3;
       }
-      #${PANEL_ID} button:hover {
+      #${PANEL_ID} button:hover:not(:disabled) {
         opacity: 0.92;
+      }
+      #${PANEL_ID} button:disabled,
+      #${PANEL_ID} .tm-range-select:disabled {
+        opacity: 0.48;
+        cursor: not-allowed;
       }
       #${PANEL_ID} button.tm-primary {
         background: #1d4ed8;
@@ -4976,6 +5087,11 @@
         border-radius: 8px;
         padding: 8px;
       }
+      #${PANEL_ID} .tm-acquisition-progress {
+        white-space: pre-line;
+        font-weight: 700;
+      }
+      #${PANEL_ID} .tm-acquisition-progress[hidden] { display: none; }
       #${PANEL_ID} .tm-label {
         font-size: 12px;
         font-weight: 800;
@@ -5038,7 +5154,7 @@
           <div class="tm-label">検索結果を取得</div>
           <select class="tm-range-select">
             <option value="current">このページだけ</option>
-            <option value="3" selected>3ページまで</option>
+            <option value="3">3ページまで</option>
             <option value="all">全ページ</option>
           </select>
           <div class="tm-buttons">
@@ -5053,6 +5169,8 @@
             <button class="btn-single-save tm-primary">この求人を取得</button>
           </div>
         </div>
+
+        <div class="tm-acquisition-progress tm-info" role="status" aria-live="polite" hidden></div>
 
         <div class="tm-group">
           <div class="tm-label">コピー</div>
@@ -5139,16 +5257,30 @@
 
     document.body.appendChild(panel);
 
+    const rangeSelect = panel.querySelector('.tm-range-select');
+    rangeSelect.value = loadSearchRangeSelection();
+    rangeSelect.addEventListener('change', () => saveSearchRangeSelection(rangeSelect.value));
+
     panel.querySelector('.btn-panel-collapse').addEventListener('click', () => togglePanelCollapsed());
     applyPanelCollapsedState(loadPanelCollapsed());
     updatePanelPageContext();
 
     panel.querySelector('.btn-single-save')?.addEventListener('click', () => saveCurrentJobAsSingleResult());
-    panel.querySelector('.btn-range-start')?.addEventListener('click', () => startSelectedSearchRange());
+    panel.querySelector('.btn-range-start')?.addEventListener('click', () => {
+      startSelectedSearchRange();
+      refreshAcquisitionUi();
+    });
     panel.querySelector('.btn-sales-copy').addEventListener('click', () => copySalesResearch());
     panel.querySelector('.btn-batch-copy').addEventListener('click', () => copyBatchResults());
-    panel.querySelector('.btn-toggle-run').addEventListener('click', () => toggleRunPause());
-    panel.querySelector('.btn-batch-clear').addEventListener('click', () => clearBatchResults());
+    panel.querySelector('.btn-toggle-run').addEventListener('click', () => {
+      toggleRunPause();
+      refreshAcquisitionUi();
+    });
+    panel.querySelector('.btn-batch-clear').addEventListener('click', () => {
+      if (hasActiveWork()) return;
+      clearBatchResults();
+      refreshAcquisitionUi();
+    });
 
     panel.querySelector('.btn-copy-header').addEventListener('click', () => handleCopy(true));
     panel.querySelector('.btn-copy-row').addEventListener('click', () => handleCopy(false));
@@ -5178,6 +5310,7 @@
     });
 
     refreshRunButtonLabel();
+    refreshAcquisitionUi();
   }
 
   function updatePanelPageContext() {
@@ -5227,6 +5360,7 @@
     refreshSearchInfo();
     refreshRunButtonLabel();
     refreshPanelCollapsedSummary();
+    refreshAcquisitionUi();
     autoRunSearchCrawlIfNeeded();
     autoRunBatchIfNeeded();
   }
@@ -5249,6 +5383,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.3.0: loaded');
+  console.log('Indeed Helper Batch Export v2.4.3: loaded');
 })();
 
