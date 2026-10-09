@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.4.4
+// @version      2.4.5
 // @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -5400,8 +5400,23 @@
     }
   }
 
+  function isIndeedCompanyPage() {
+    // 企業ページは専用のCompany Helperに任せ、通常HelperのUIを出さない。
+    return /^\/cmp(?:\/|$)/i.test(location.pathname);
+  }
+
   function boot() {
     if (!document.body) return;
+
+    const existingPanel = document.getElementById(PANEL_ID);
+    if (isIndeedCompanyPage()) {
+      // SPA遷移で残っているパネルも非表示にする。取得済みデータや設定は触らない。
+      if (existingPanel) existingPanel.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    // 求人ページに戻ったら、元の開閉状態を保ったままパネルを復帰させる。
+    if (existingPanel) existingPanel.style.removeProperty('display');
+
     createPanel();
     refreshStatus();
     refreshBatchInfo();
@@ -5431,6 +5446,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.4.4: loaded');
+  console.log('Indeed Helper Batch Export v2.4.5: loaded');
 })();
 
