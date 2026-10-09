@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.4.3
+// @version      2.4.4
 // @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -1250,7 +1250,7 @@
     "source": "本文解析/派生",
     "type": "配列(::)",
     "meaning": "本文見出しフォールバックで検出した見出し一覧",
-    "note": "媒体差分の監視用",
+    "note": "h1-h6、角括弧・コロン見出しのほか、独立したb/strong見出しも検出",
     "confidence": "高"
   },
   "本文見出し未対応一覧": {
@@ -1258,7 +1258,7 @@
     "source": "本文解析/派生",
     "type": "配列(::)",
     "meaning": "辞書に未登録だった本文見出し一覧",
-    "note": "新媒体対応の追加候補を発見する診断列",
+    "note": "独立した太字の未対応項目名等を診断。通常の強調文は見出し扱いしない",
     "confidence": "高"
   },
   "recentQueryString": {
@@ -1541,6 +1541,7 @@
     '応募方法',
     '選考プロセス',
     'その他',
+    '求人本文全文',
     '検索語一致タイプ',
     'タイトル検索語一致',
     'normalizedtitle相当検索語一致',
@@ -1903,6 +1904,43 @@
     return { html: '', source: '' };
   }
 
+  // 本文の強調表示をすべて見出しとみなすと、広告コピーや本文中の太字まで
+  // 区切ってしまう。辞書一致か、明らかな項目名のみ見出し候補とする。
+  const UNMAPPED_BOLD_SECTION_HEADINGS = new Set([
+    '雇用形態', '雇用区分', '契約形態', '契約期間', '契約更新',
+    '寮・社宅', '寮社宅', '寮', '社宅', '社員寮', '部屋タイプ', '部屋情報',
+    '家具・備品', '家具備品', '家賃', '住居', '住居情報', '設備',
+    '募集人数', '採用人数', '服装', '持ち物', '仕事の流れ'
+  ]);
+
+  function looksLikeUnmappedBoldSectionHeading(heading) {
+    const key = normalizeBodyHeading(heading);
+    if (!key || key.length > 18 || /[。．、，！？!?]/.test(key)) return false;
+    if (UNMAPPED_BOLD_SECTION_HEADINGS.has(key)) return true;
+    // 定型ラベルの別表記だけ補足。短いキャッチコピーは見出し扱いしない。
+    return /^(?:寮|社宅|社員寮|部屋|家具|備品|家賃|契約|雇用)(?:・|\/|の)?(?:有無|詳細|条件|情報|種別|区分|期間|タイプ|設備|備品|制度|形態)?$/.test(key);
+  }
+
+  function isStandaloneBoldHeading(el) {
+    if (!el || el.closest('h1,h2,h3,h4,h5,h6,a,button')) return false;
+    // 入れ子の強調タグ（<b><strong>見出し</strong></b>）は外側のみ処理する。
+    if (el.parentElement?.closest('b,strong')) return false;
+
+    function neighboringSignificantNode(direction) {
+      let node = el[direction];
+      while (node && (node.nodeType === 8 || (node.nodeType === 3 && !node.textContent.trim()))) {
+        node = node[direction];
+      }
+      return node;
+    }
+    function isLineBoundary(node) {
+      return !node || (node.nodeType === 1 && node.tagName === 'BR');
+    }
+    // 単独行の太字（<br><b>給与</b><br> など）のみ対象。
+    return isLineBoundary(neighboringSignificantNode('previousSibling')) &&
+      isLineBoundary(neighboringSignificantNode('nextSibling'));
+  }
+
   function bodyHtmlToMarkedText(html) {
     if (!html) return '';
     const doc = new DOMParser().parseFromString(String(html), 'text/html');
@@ -1911,6 +1949,15 @@
 
     const markerPrefix = '__TM_IH_HEADING__';
     const markerSuffix = '__TM_IH_END_HEADING__';
+
+    // h1-h6 と同じ明示マーカーで処理する。未知の独立ラベルでも前セクション
+    // を終わらせ、別の項目が福利厚生などに連結されるのを防ぐ。
+    body.querySelectorAll('b,strong').forEach(el => {
+      if (!isStandaloneBoldHeading(el)) return;
+      const heading = normalizeText(el.textContent || '');
+      if (!heading || (!lookupBodySectionCanonical(heading) && !looksLikeUnmappedBoldSectionHeading(heading))) return;
+      el.replaceWith(doc.createTextNode(`\n${markerPrefix}${heading}${markerSuffix}\n`));
+    });
 
     body.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(el => {
       const heading = normalizeText(el.textContent || '');
@@ -3729,6 +3776,7 @@
         'Indeed関連検索what（raw）': row['Indeed関連検索what'] || '',
         '関連検索what補助候補': related.relatedCandidates,
         'TOP画像URL': firstPhotoUrl(row['求人写真URL一覧']),
+        '求人本文全文': row['本文全文'] || '',
         'normalizedtitle相当検索語一致': query ? boolText(containsSearchQuery(related.normalizedTitleProxy, query)) : '',
         '検索語一致タイプ': row['検索語一致タイプ'] || '',
         'タイトル検索語一致': row['タイトル検索語一致'] || '',
@@ -5383,6 +5431,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.4.3: loaded');
+  console.log('Indeed Helper Batch Export v2.4.4: loaded');
 })();
 
