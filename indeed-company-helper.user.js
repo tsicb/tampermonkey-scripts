@@ -2,7 +2,7 @@
 // @name         Indeed Company Helper - Reviews & Q&A
 // @name:ja      Indeed企業情報Helper（クチコミ・質問箱）
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.0.1
+// @version      1.1.0
 // @description  Collect public Indeed company reviews, company ratings, and question/answer entries into TSV; supports pause/resume and completeness checks.
 // @description:ja Indeed企業ページの公開クチコミ・質問回答をTSV収集（全件照合、一時停止・再開対応）
 // @match        https://jp.indeed.com/cmp/*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VER = '1.0.1';
+  const VER = '1.1.0';
   const PREFIX = 'indeedCompanyHelper_v1_';
   const ROOT_ID = 'ich-root-v1';
   const BASE = 'https://jp.indeed.com';
@@ -26,6 +26,9 @@
   const HISTORY_KEY = PREFIX + 'activity_v1';
   const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
   const HISTORY_MAX_EVENTS = 3000;
+  const IMPORT_MAX_FILES = 80;
+  const IMPORT_MAX_FILE_BYTES = 8 * 1024 * 1024;
+  const IMPORT_MAX_TOTAL_BYTES = 48 * 1024 * 1024;
 
   const S = (x) => (x === null || x === undefined ? '' : String(x));
   const val = (obj, ...keys) => keys.reduce((acc, key) => acc && acc[key], obj);
@@ -79,6 +82,149 @@
     if (!data || typeof data !== 'object') throw new Error('企業情報JSONが不正です。');
     return { data, doc };
   }
+  function normalizeImportedHtml(text) {
+    const source=S(text).replace(/^\uFEFF/, '');
+    // Chat / Markdown copied HTML may escape punctuation (e.g. \<html, https\://).
+    // Apply only if the opening HTML tag is backslash-escaped.
+    return /^\s*\\<(?:!doctype|html)/i.test(source)
+      ? source.replace(/\\([!#$%&()*+,./:;<=>?@\[\]^_`{|}~-])/g, '$1')
+      : source;
+  }
+  function detailPageIndex(p) {
+    const raw=val(p,'pagination','currentPage');
+    if(raw===undefined || raw===null || raw==='')return 1;
+    const number=Number(raw);
+    if(!Number.isSafeInteger(number) || number<1 || number>100000)
+      throw new Error('回答ページ番号が不正です。');
+    return number;
+  }
+  function answerCompleteness(q) {
+    const known=Number.isSafeInteger(Number(q.totalAnswerCount)) && Number(q.totalAnswerCount)>=0 &&
+      (q.answerTotalKnown !== false);
+    const count=Object.keys(q.answers||{}).length;
+    if (!known) return '総数未確認';
+    if (count > Number(q.totalAnswerCount)) return '要確認';
+    return count === Number(q.totalAnswerCount) ? '完全' : '一部未取得';
+  }
+  function parseImportHtml(source, filename, currentPath) {
+    const {data,doc}=parseDocument(normalizeImportedHtml(source));
+    const p=data.paginatedAnswersViewModel;
+    if (!p || !Array.isArray(p.answers)) throw new Error('質問詳細の回答JSONがありません。');
+    const link=doc.querySelector('link[rel="canonical"]');
+    const canonical=S(link?.getAttribute('href')||'');
+    const questionUrl=safeUrl(canonical || p.questionUrl, currentPath);
+    // A canonical URL alone is insufficient unless it identifies exactly this company/question.
+    const companyPath=getCompanyPath(canonical || S(p.questionUrl));
+    if (!companyPath || companyPath!==currentPath || !questionUrl ||
+        !new URL(questionUrl).pathname.startsWith(currentPath+'/faq/')) {
+      throw new Error('この企業の質問詳細ページではありません。');
+    }
+    const result=answersExtract(data,currentPath);
+    const quid=new URL(questionUrl).searchParams.get('quid');
+    if (quid && quid!==result.questionId) throw new Error('質問IDがURLとJSONで一致しません。');
+    if (!result.questionId) throw new Error('質問IDを確認できません。');
+    const page=detailPageIndex(p);
+    const known=Number.isSafeInteger(Number(data.headerViewModel?.qnaQuestionViewModel?.totalAnswerCount ?? p.totalAnswerCount)) &&
+      Number(data.headerViewModel?.qnaQuestionViewModel?.totalAnswerCount ?? p.totalAnswerCount)>=0;
+    return {...result, page, sourceUrl:questionUrl, filename:S(filename),
+      answerTotalKnown:known, companyId:companyIdFromData(data,currentPath),
+      companyName:companyFromData(data)};
+  }
+  function importPlan(state, path, parsedPages) {
+    const groups=new Map();
+    const problems=[];
+    const stats={files:parsedPages.length,questions:0,answers:0,newAnswers:0,duplicates:0,conflicts:0,pages:0};
+    for(const p of parsedPages) {
+      if (!p || !p.questionId) throw new Error('取込対象の質問IDが不正です。');
+      if (!safeUrl(p.sourceUrl,path) || getCompanyPath(p.sourceUrl)!==path)
+        throw new Error('別企業のHTMLを取り込むことはできません。');
+      const savedId=S(state?.companyId), importId=S(p.companyId), pathId=path.split('/').pop();
+      if(savedId && savedId!==pathId && importId && importId!==pathId && savedId!==importId)
+        throw new Error('同じ企業URLですが企業IDが一致しません。');
+      if (!Number.isSafeInteger(p.page)||p.page<1) throw new Error('ページ番号が不正です。');
+      if (!groups.has(p.questionId)) groups.set(p.questionId, {question:p, pages:{},answers:{}});
+      const group=groups.get(p.questionId);
+      if(group.question.questionText && p.questionText && group.question.questionText!==p.questionText)
+        throw new Error('同一質問IDの質問文に不整合があります。');
+      if(group.pages[p.page]) {
+        const previous=group.pages[p.page];
+        const first=Object.keys(previous.answers).sort().join('|');
+        const next=Object.keys(p.answers).sort().join('|');
+        if(first!==next) {problems.push(`${p.filename}: 同じ質問・ページに異なる回答があります`);stats.conflicts++;}
+      } else { group.pages[p.page]=p;stats.pages++; }
+      group.question.totalAnswerCount=Math.max(Number(group.question.totalAnswerCount||0),Number(p.totalAnswerCount||0));
+      group.question.answerTotalKnown=group.question.answerTotalKnown||p.answerTotalKnown;
+      for(const [id,a] of Object.entries(p.answers)) {
+        if(!id || id!==a.answerId) throw new Error('回答IDの構造が不正です。');
+        const existing=group.answers[id] || state?.questions?.[p.questionId]?.answers?.[id];
+        if(existing) {
+          stats.duplicates++;
+          if (S(existing.answerText)!==S(a.answerText)) {
+            stats.conflicts++; problems.push(`${p.filename}: 回答 ${id} の本文が保存済みデータと異なります（既存優先）`);
+          }
+        } else {
+          stats.newAnswers++;
+        }
+        if(!group.answers[id])group.answers[id]={...a,answerSource:'保存HTML',answerPage:p.page,
+          answerSourceUrl:p.sourceUrl,answerImportedAt:now()};
+      }
+    }
+    stats.questions=groups.size;
+    stats.answers=Array.from(groups.values()).reduce((n,g)=>n+Object.keys(g.answers).length,0);
+    return {groups,stats,problems};
+  }
+  function applyImportPlan(previous, path, plan) {
+    // Build a copy; never mutate stored state until all validation/merging succeeds.
+    const state=previous ? JSON.parse(JSON.stringify(previous)) : newState(path,{target:'faq',scope:'all',answers:'full'});
+    if(!previous) {state.status='done';state.stage='done';state.offlineOnly=true;}
+    normalizeState(state);
+    const stamp=now();
+    let added=0;
+    for(const [qid,group] of plan.groups) {
+      const p=group.question;
+      let q=state.questions[qid];
+      if(!q) {
+        q={questionId:qid,questionText:p.questionText,questionDate:p.questionDate,
+          questionDisplayDate:p.questionDisplayDate,questionUrl:p.sourceUrl,
+          companyName:p.companyName,totalAnswerCount:p.totalAnswerCount,answers:{},
+          detailFetched:false,detailStatus:'HTML取込',page:0,sourceUrl:p.sourceUrl,fetchedAt:stamp,
+          answerTotalKnown:p.answerTotalKnown,detailPages:{}};
+        state.questions[qid]=q;
+      }
+      if(q.questionText && p.questionText && q.questionText!==p.questionText)
+        throw new Error('質問ID '+qid+' の質問文が保存済みデータと一致しません。');
+      if(!q.questionText)q.questionText=p.questionText;
+      if(!q.questionDate)q.questionDate=p.questionDate;
+      if(!q.questionDisplayDate)q.questionDisplayDate=p.questionDisplayDate;
+      if(!q.questionUrl)q.questionUrl=p.sourceUrl;
+      if(!q.companyName)q.companyName=p.companyName;
+      q.answerTotalKnown=q.answerTotalKnown===false ? p.answerTotalKnown : q.answerTotalKnown!==false;
+      q.totalAnswerCount=Math.max(Number(q.totalAnswerCount)||0,Number(p.totalAnswerCount)||0);
+      q.detailPages ||= {};
+      for(const [num,page] of Object.entries(group.pages)) {
+        const old=q.detailPages[num];
+        if(old && old.source==='質問詳細' && num==='1') {
+          // The original online detail fetch may already have recorded the first page.
+          q.detailPages[num]={...old,alsoImported:true};
+        } else {
+          q.detailPages[num]={source:'保存HTML',sourceUrl:page.sourceUrl,
+            filename:page.filename,answerCount:Object.keys(page.answers).length,importedAt:stamp};
+        }
+      }
+      for(const [id,a] of Object.entries(group.answers)) {
+        if(!q.answers[id]) {q.answers[id]={...a,answerImportedAt:stamp};added++;}
+      }
+      q.detailStatus=answerCompleteness(q)==='完全'?'HTML取込・回答完全':'HTML取込・回答一部未取得';
+    }
+    const first=Array.from(plan.groups.values())[0]?.question;
+    if(!state.companyName)state.companyName=first?.companyName||'';
+    if(!previous && first?.companyId)state.companyId=first.companyId;
+    state.importedHtmlPages=Object.values(state.questions).reduce((n,q)=>n+
+      Object.values(q.detailPages||{}).filter(p=>p.source==='保存HTML'||p.alsoImported).length,0);
+    state.lastImportAt=stamp;
+    return {state,added};
+  }
+
   function reviewsExtract(j, path, sourceUrl, page) {
     const model = j.reviewsList;
     if (!model || !Array.isArray(model.items)) throw new Error('reviewsList.items が見つかりません。');
@@ -165,7 +311,8 @@
     return { questionId: qid, companyName: S(q.companyName || p.companyName),
       questionText: S(val(q,'questionText','text')), questionDate: S(q.creationDate),
       questionDisplayDate: S(q.formattedCreationDateTime), questionUrl: safeUrl(p.questionUrl,path),
-      totalAnswerCount: Number(q.totalAnswerCount ?? p.totalAnswerCount) || 0, answers };
+      totalAnswerCount: Number(q.totalAnswerCount ?? p.totalAnswerCount) || 0, answers,
+      page:detailPageIndex(p) };
   }
   function nextReviewUrl(j, doc, path, currentUrl) {
     const structured = [
@@ -228,6 +375,13 @@
       state.rateLimit = null;
       changed = true;
     }
+    for(const q of Object.values(state.questions||{})) {
+      if (!q.detailPages) {
+        q.detailPages=q.detailFetched ? {'1':{source:'質問詳細',sourceUrl:q.questionUrl||'',
+          answerCount:Object.keys(q.answers||{}).length}} : {};
+        changed=true;
+      }
+    }
     return changed;
   }
   function summaryStatus(state, key) {
@@ -244,13 +398,15 @@
       return n && c.reviews !== n ? '一部未取得' : '完全取得';
     }
     if (key === 'faq') {
-      if (!state.faqDone) return state.status==='running'?'取得中':'一部未取得';
+      if (!state.faqDone) return state.offlineOnly?'質問一覧未確認':state.status==='running'?'取得中':'一部未取得';
       if (state.options.scope==='one') return '範囲限定';
       return state.expectedFaqCount && c.questions!==state.expectedFaqCount ? '一部未取得':'完全取得';
     }
     if (key === 'answers') {
-      if (state.options.answers==='list') return '代表回答のみ';
-      if (!state.detailDone) return state.status==='running'?'取得中':'一部未取得';
+      if (state.offlineOnly) return '取込済み質問のみ';
+      if (state.options.answers==='list' && c.incompleteQuestions) return '代表回答のみ／一部未取得';
+      if (!state.detailDone && state.options.answers!=='list')
+        return state.status==='running'?'取得中':'一部未取得';
       if (state.options.scope==='one') return '範囲限定';
       return c.incompleteQuestions ? '一部未取得' : '完全取得';
     }
@@ -327,7 +483,9 @@
     ['currentlyEmployed','回答者現職フラグ'],['official','企業公式回答フラグ'],
     ['upvotes','参考になった数'],['downvotes','参考にならなかった数'],
     ['answerSource','回答取得元'],['detailStatus','質問詳細取得状態'],
-    ['completeness','回答完全性'],['page','質問一覧ページ番号'],['sourceUrl','取得元URL']];
+    ['completeness','回答完全性'],['page','質問一覧ページ番号'],['sourceUrl','取得元URL'],
+    ['answerPage','回答詳細ページ番号'],['answerSourceUrl','回答取得元URL'],
+    ['answerImportedAt','回答HTML取込日時'],['importedPageCount','保存HTML取込ページ数']];
   function outputRows(state, kind) {
     if (!state) return {headers:kind==='summary'?SUMMARY_HEADERS:kind==='reviews'?REVIEW_HEADERS:QNA_HEADERS,rows:[]};
     const c = counts(state);
@@ -350,16 +508,18 @@
     const rows=[];
     for(const q of Object.values(state.questions).sort((a,b) => (a.page-b.page) || a.questionId.localeCompare(b.questionId))) {
       const n = Object.keys(q.answers || {}).length;
-      const complete = n === q.totalAnswerCount;
+      const complete = answerCompleteness(q);
       const question = {...base, fetchedAt:q.fetchedAt,
         questionId:q.questionId,questionText:q.questionText,questionDate:q.questionDate,
         questionDisplayDate:q.questionDisplayDate,questionUrl:q.questionUrl,
         totalAnswerCount:q.totalAnswerCount,collectedAnswerCount:n,
-        detailStatus:q.detailStatus,completeness:complete?'完全':'一部未取得',page:q.page,sourceUrl:q.sourceUrl};
+        detailStatus:q.detailStatus,completeness:complete,page:q.page,sourceUrl:q.sourceUrl,
+        importedPageCount:Object.values(q.detailPages||{}).filter(p=>p.source==='保存HTML'||p.alsoImported).length};
       const answers = Object.values(q.answers || {});
       if (!answers.length) rows.push({...question,answerSource:'回答なし／未取得'});
       else for (const a of answers) rows.push({...question,...a,
-        answerSource: q.detailFetched ? '質問詳細' : '質問一覧'});
+        answerSource:a.answerSource || (q.detailFetched?'旧版（詳細・一覧混在）':'質問一覧'),
+        answerPage:a.answerPage||'',answerSourceUrl:a.answerSourceUrl||'',answerImportedAt:a.answerImportedAt||''});
     }
     return {headers:QNA_HEADERS,rows};
   }
@@ -481,8 +641,14 @@
             const {data}=await requestHtml(q.questionUrl,state);
             const result=answersExtract(data,state.companyPath);
             if(result.questionId!==q.questionId) throw new Error(`詳細ページの質問IDが一致しません：${q.questionId}`);
-            q.answers={...(q.answers||{}),...result.answers};
+            const detailAnswers=Object.fromEntries(Object.entries(result.answers).map(([id,a])=>
+              [id,{...a,answerSource:'質問詳細',answerPage:result.page,
+                answerSourceUrl:q.questionUrl,answerImportedAt:''}]));
+            q.answers={...(q.answers||{}),...detailAnswers};
             q.detailFetched=true;q.detailStatus='取得済み';
+            q.detailPages ||= {};
+            q.detailPages[result.page]={source:'質問詳細',sourceUrl:q.questionUrl,
+              answerCount:Object.keys(result.answers).length,fetchedAt:now()};
             q.totalAnswerCount=Math.max(q.totalAnswerCount,result.totalAnswerCount);
             state.visitedDetails[q.questionId]=true;
             state.lastSuccessAt=now();save(state);render();
@@ -516,7 +682,9 @@
   if (typeof globalThis !== 'undefined' && globalThis.__ICH_TEST_MODE__ === true) {
     globalThis.__ICH_TEST_API__ = {reviewsExtract,questionsExtract,answersExtract,nextReviewUrl,
       newState,counts,summaryStatus,outputRows,toTSV,mergeQuestion,safeUrl,runCollection,
-      normalizeState,activityEvents,activitySummary,retryAfterInfo,requestHtml};
+      normalizeState,activityEvents,activitySummary,retryAfterInfo,requestHtml,
+      normalizeImportedHtml,detailPageIndex,answerCompleteness,parseImportHtml,
+      importPlan,applyImportPlan};
     return;
   }
 
@@ -536,7 +704,7 @@
   let state=read(key,null);
   if (state && normalizeState(state)) write(key,state);
   let uiOpen=read(uiKey,true);
-  let interrupted=false, busy=false;
+  let interrupted=false, busy=false, importBusy=false, pendingImport=null;
   if(state?.status==='running') {state.status='paused'; addWarning(state,'前回の取得はページ移動・終了により中断されました。再開できます。');write(key,state);}
 
   const mount=document.createElement('div');mount.id=ROOT_ID;
@@ -559,6 +727,8 @@
     .hint{font-size:11px;color:#555;margin-top:6px}.warn{font-size:11px;color:#9d3f00;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px}
     #toast{font-size:11px;color:#20572b;min-height:16px;margin-top:6px} .strong{font-weight:700} .check{padding:3px 0;color:#39465a}
     .outrow{display:flex;gap:6px;margin-bottom:6px}.outrow>.btn{min-width:0}.outrow>.btn:first-child{flex:2}
+    #import-files{display:block;width:100%;font-size:11px;margin:9px 0 4px;max-width:100%}
+    details>summary{list-style:auto}#import-report{overflow-wrap:anywhere}
   </style>
   <button id="tab" type="button" aria-label="Indeed企業情報Helperを開く">企業情報Helper</button>
   <aside id="panel" role="complementary" aria-label="Indeed企業情報Helper">
@@ -573,12 +743,22 @@
       <label><input type="radio" name="scope" value="one"> 各一覧の先頭1ページ</label></div>
       <div class="hint">1ページ指定の場合も、選択した取得対象の先頭ページを読み込みます。</div></section>
     <section id="answers-area"><div class="label">質問箱の回答</div><div class="radios">
-      <label><input type="radio" name="answers" value="full"> 全回答（不足分は詳細取得）</label>
+      <label><input type="radio" name="answers" value="full"> 質問詳細の先頭ページまで取得</label>
       <label><input type="radio" name="answers" value="list"> 一覧の代表回答のみ</label></div></section>
     <section><div class="label">取得状況</div><div class="stats" id="stats"></div>
       <div class="stats" id="history" style="margin-top:8px"></div>
       <div class="buttons"><button type="button" class="btn primary" id="start">新規取得</button><button type="button" class="btn" id="pause">一時停止</button><button type="button" class="btn" id="resume">再開</button></div>
       <div id="warnings" class="warn"></div></section>
+    <section>
+      <details id="html-import"><summary class="label" style="cursor:pointer">保存HTMLの追加取込（オフライン）</summary>
+        <div class="hint">質問詳細ページを保存したHTMLを複数選択できます。サイトへの追加通信は行いません。</div>
+        <input type="file" id="import-files" accept=".html,.htm,.txt,.md,text/html,text/plain" multiple aria-label="質問詳細の保存HTMLを選択">
+        <div class="buttons"><button type="button" class="btn" id="preview-import">選択ファイルを解析</button>
+          <button type="button" class="btn primary" id="commit-import" disabled>取込を確定</button></div>
+        <div id="import-report" class="stats" style="margin-top:8px;display:none" role="status"></div>
+        <div class="hint">別企業・質問IDの不一致・解析失敗がある場合は取り込みません。既存回答は上書きしません。</div>
+      </details>
+    </section>
     <section><div class="label">TSV出力</div>
       <div class="outrow"><button class="btn" data-copy="summary">企業サマリーをコピー</button><button class="btn" data-save="summary">保存</button></div>
       <div class="outrow"><button class="btn" data-copy="reviews">クチコミ明細をコピー</button><button class="btn" data-save="reviews">保存</button></div>
@@ -596,7 +776,7 @@
     scope:$('input[name=scope]:checked')?.value || options.scope,
     answers:$('input[name=answers]:checked')?.value || options.answers
   });
-  function save(s){ s.updatedAt=now();state=s;write(key,s); }
+  function save(s){ s.updatedAt=now();state=s;write(key,s); pendingImport=null; }
   function toast(msg){$('#toast').textContent=msg;}
   function render(){
     $('#tab').hidden=uiOpen;$('#panel').hidden=!uiOpen;
@@ -624,22 +804,24 @@
     }
     $('#history').textContent=`このブラウザの収集通信履歴（v1.0.1以降）\n直近1時間：${history.hour}回／${history.companiesHour}社\n直近24時間：${history.day}回／${history.companiesDay}社${last429}${limitInfo}`;
     $('#warnings').textContent=(state?.error ? 'エラー：'+state.error+'\n':'') + (state?.warnings||[]).slice(-4).join('\n');
-    $('#start').disabled=isRunning;
+    $('#start').disabled=isRunning||importBusy;
+    $('#preview-import').disabled=isRunning||importBusy;
+    $('#commit-import').disabled=isRunning||importBusy||!pendingImport;
     $('#pause').disabled=!isRunning;
     const waitingUntil=state?.status==='rate_limited' && state.rateLimit?.retryAt && Date.now()<state.rateLimit.retryAt;
     $('#resume').disabled=busy || !state || !['paused','error','rate_limited'].includes(state.status) || Boolean(waitingUntil);
     $('#resume').textContent=state?.status==='rate_limited'?'再開（制限確認）':'再開';
-    $('#clear').disabled=isRunning;
+    $('#clear').disabled=isRunning||importBusy;
     $$('[data-copy],[data-save]').forEach(el => el.disabled=!state);
   }
   function setOpen(open){uiOpen=open;write(uiKey,open);render();}
   $('#tab').addEventListener('click',()=>setOpen(true));
   $('#close').addEventListener('click',()=>setOpen(false));
   $$('input[type=radio]').forEach(el=>el.addEventListener('change',()=>{
-    if(busy)return;options=getUIOptions();write(optionsKey,options);render();
+    if(busy||importBusy)return;clearImportPreview();options=getUIOptions();write(optionsKey,options);render();
   }));
   async function execute(s){
-    if(busy)return;
+    if(busy||importBusy)return;
     busy=true;interrupted=false;
     s.status='running';s.error='';save(s);render();
     await runCollection(s,save,render,()=>interrupted);
@@ -647,7 +829,7 @@
     busy=false;render();
   }
   $('#start').addEventListener('click',()=>{
-    if(busy)return;
+    if(busy||importBusy)return;
     if(state && !window.confirm('この企業の保存済み収集データを破棄し、取得し直しますか？'))return;
     options=getUIOptions();write(optionsKey,options);
     execute(newState(path,options));
@@ -657,7 +839,7 @@
     interrupted=true;toast('停止を要求しました。実行中の通信が終わった時点で一時停止します。');
   });
   $('#resume').addEventListener('click',()=>{
-    if(busy || !state)return;
+    if(busy || importBusy || !state)return;
     if(state.status==='rate_limited') {
       if (state.rateLimit?.retryAt && Date.now()<state.rateLimit.retryAt) {
         toast('Retry-Afterによりサーバー指定の待機中です。');return;
@@ -674,7 +856,7 @@
     execute(state);
   });
   $('#clear').addEventListener('click',()=>{
-    if(busy)return;
+    if(busy||importBusy)return;
     if(!window.confirm('この企業の取得データをクリアしますか？（設定は維持します）'))return;
     state=null;GM_deleteValue(key);toast('この企業の取得データをクリアしました。');render();
   });
@@ -696,6 +878,68 @@
     root.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);
     toast('TSV保存を開始しました。');
   }
+  function clearImportPreview(message='') {
+    pendingImport=null;
+    $('#commit-import').disabled=true;
+    $('#import-report').style.display=message?'block':'none';
+    $('#import-report').textContent=message;
+  }
+  $('#import-files').addEventListener('change',()=>clearImportPreview());
+  $('#preview-import').addEventListener('click',async()=>{
+    if(busy||importBusy)return;
+    const files=Array.from($('#import-files').files||[]);
+    if(!files.length){clearImportPreview('HTMLファイルを選択してください。');return;}
+    if(files.length>IMPORT_MAX_FILES){clearImportPreview(`最大${IMPORT_MAX_FILES}ファイルまでです。`);return;}
+    if(files.some(f=>f.size>IMPORT_MAX_FILE_BYTES)||files.reduce((n,f)=>n+f.size,0)>IMPORT_MAX_TOTAL_BYTES){
+      clearImportPreview('ファイル容量の上限を超えました（1件8MB・合計48MB）。');return;
+    }
+    importBusy=true;clearImportPreview();render();
+    const extracted=[],failures=[];
+    try {
+      for(const f of files) {
+        try {
+          if(!/\.(?:html?|txt|md)$/i.test(f.name))throw new Error('対応形式はHTML・TXT・MDです。');
+          const parsed=parseImportHtml(await f.text(),f.name,path);
+          if(state?.questions?.[parsed.questionId]?.questionText && parsed.questionText &&
+             state.questions[parsed.questionId].questionText!==parsed.questionText)
+             throw new Error('質問IDが既存の質問文と一致しません。');
+          extracted.push(parsed);
+        } catch(e) {failures.push(`${f.name}: ${S(e?.message||e)}`);}
+      }
+      if(failures.length) {
+        clearImportPreview(`${files.length}ファイル中${failures.length}件が解析できません。保存内容は変更していません。\n${failures.slice(0,12).join('\n')}`);
+      } else {
+        const plan=importPlan(state,path,extracted);
+        // Dry-run once to catch collisions before enabling commit.
+        applyImportPlan(state,path,plan);
+        const stateKey=read(key,null)?.updatedAt||'';
+        pendingImport={plan,stateKey,files:files.map(f=>f.name)};
+        const st=plan.stats;
+        const mismatch=plan.problems.length?`\n注意：${plan.problems.slice(0,8).join(' / ')}`:'';
+        $('#import-report').style.display='block';
+        $('#import-report').textContent=`解析完了：${st.files}ファイル\n質問：${st.questions}件／回答ページ：${st.pages}ページ\nHTML内のユニーク回答：${st.answers}件\n新規追加見込み：${st.newAnswers}件／重複：${st.duplicates}件\n内容不一致：${st.conflicts}件（既存優先）${mismatch}\n「取込を確定」で保存します。`;
+      }
+    } catch(e) {clearImportPreview('解析失敗：'+S(e?.message||e));}
+    finally {importBusy=false;render();}
+  });
+  $('#commit-import').addEventListener('click',()=>{
+    if(busy||importBusy||!pendingImport)return;
+    const staged=pendingImport;
+    if((read(key,null)?.updatedAt||'')!==staged.stateKey){
+      clearImportPreview('保存内容が別の操作で変更されました。解析し直してください。');return;
+    }
+    try {
+      const result=applyImportPlan(state,path,staged.plan);
+      // Persist once. If storage fails, keep original UI state and preview.
+      const candidate=result.state;
+      candidate.updatedAt=now();
+      write(key,candidate);
+      state=candidate;
+      clearImportPreview(`取込完了：回答${result.added}件を追加。サイトへの通信は行っていません。`);
+      render();
+      toast(`保存HTMLの取込完了（追加回答${result.added}件）`);
+    } catch(e) {clearImportPreview('取込失敗・元データ維持：'+S(e?.message||e));render();}
+  });
   $$('[data-copy]').forEach(el=>el.addEventListener('click',()=>copy(el.dataset.copy)));
   $$('[data-save]').forEach(el=>el.addEventListener('click',()=>download(el.dataset.save)));
   render();
