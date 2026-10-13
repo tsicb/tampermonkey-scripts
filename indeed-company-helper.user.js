@@ -2,7 +2,7 @@
 // @name         Indeed Company Helper - Reviews & Q&A
 // @name:ja      Indeed企業情報Helper（クチコミ・質問箱）
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Collect public Indeed company reviews, company ratings, and question/answer entries into TSV; supports pause/resume and completeness checks.
 // @description:ja Indeed企業ページの公開クチコミ・質問回答をTSV収集（全件照合、一時停止・再開対応）
 // @match        https://jp.indeed.com/cmp/*
@@ -17,12 +17,15 @@
 
 (() => {
   'use strict';
-  const VER = '1.0.0';
+  const VER = '1.0.1';
   const PREFIX = 'indeedCompanyHelper_v1_';
   const ROOT_ID = 'ich-root-v1';
   const BASE = 'https://jp.indeed.com';
   const DELAY_MS = 1200;
-  const MAX_REQUESTS = 1500; // 防御的な無限巡回対策。達した場合は「一部未取得」扱い
+  const MAX_REQUESTS = 1500; // 無限巡回対策。429の回避を目的とした設定値ではない
+  const HISTORY_KEY = PREFIX + 'activity_v1';
+  const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+  const HISTORY_MAX_EVENTS = 3000;
 
   const S = (x) => (x === null || x === undefined ? '' : String(x));
   const val = (obj, ...keys) => keys.reduce((acc, key) => acc && acc[key], obj);
@@ -203,6 +206,7 @@
       reviewPages: 0, faqPages: 0, visitedReviews: {}, visitedFaq: {}, visitedDetails:{},
       reviewNext: BASE + path + '/reviews', faqNext: BASE + path + '/faq',
       reviewDone: false, faqDone: false, detailDone: false, requestCount: 0,
+      requestCounts: {reviews:0,faq:0,details:0,legacy:0}, rateLimit:null,
       warnings: [], error: '', lastUrl: '', lastSuccessAt: '' };
   }
   function counts(state) {
@@ -212,22 +216,85 @@
       expectedAnswers:qs.reduce((n,q) => n + Number(q.totalAnswerCount || 0), 0),
       incompleteQuestions:qs.filter(q => Object.keys(q.answers || {}).length !== Number(q.totalAnswerCount || 0)).length };
   }
+  // v1.0.0の企業別保存値は残したまま移行する。過去の内訳は推測せず「旧版・未分類」。
+  function normalizeState(state) {
+    if (!state) return false;
+    let changed = false;
+    if (!state.requestCounts) {
+      state.requestCounts = {reviews:0,faq:0,details:0,legacy:Number(state.requestCount)||0};
+      changed = true;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state,'rateLimit')) {
+      state.rateLimit = null;
+      changed = true;
+    }
+    return changed;
+  }
   function summaryStatus(state, key) {
     if (!state) return '未取得';
-    if (key === 'reviews' && !['both','reviews'].includes(state.options.target)) return '未取得';
-    if (key === 'faq' && !['both','faq'].includes(state.options.target)) return '未取得';
+    const isReviews = ['both','reviews'].includes(state.options.target);
+    const isFaq = ['both','faq'].includes(state.options.target);
+    if (key === 'reviews' && !isReviews) return '未取得';
+    if ((key === 'faq' || key === 'answers') && !isFaq) return '未取得';
     const c = counts(state);
-    if (state.status === 'running' || state.status === 'paused') return state.status === 'running' ? '取得中' : '一時停止';
-    if (state.status === 'error') return '取得エラー';
-    if (state.options.scope === 'one') return '範囲限定';
     if (key === 'reviews') {
+      if (!state.reviewDone) return state.status==='running'?'取得中':'一部未取得';
+      if (state.options.scope==='one') return '範囲限定';
       const n = Number(state.reviewSummary.listReviewCount || state.reviewSummary.reviewCount || 0);
-      return !state.reviewDone || (n && c.reviews !== n) ? '一部未取得' : '完全取得';
+      return n && c.reviews !== n ? '一部未取得' : '完全取得';
     }
-    if (!state.faqDone || !state.detailDone ||
-        (state.expectedFaqCount && c.questions !== state.expectedFaqCount) ||
-        (state.options.answers === 'full' && c.incompleteQuestions)) return '一部未取得';
-    return state.options.answers === 'list' ? '代表回答のみ' : '完全取得';
+    if (key === 'faq') {
+      if (!state.faqDone) return state.status==='running'?'取得中':'一部未取得';
+      if (state.options.scope==='one') return '範囲限定';
+      return state.expectedFaqCount && c.questions!==state.expectedFaqCount ? '一部未取得':'完全取得';
+    }
+    if (key === 'answers') {
+      if (state.options.answers==='list') return '代表回答のみ';
+      if (!state.detailDone) return state.status==='running'?'取得中':'一部未取得';
+      if (state.options.scope==='one') return '範囲限定';
+      return c.incompleteQuestions ? '一部未取得' : '完全取得';
+    }
+    return '未取得';
+  }
+
+  function activityEvents() {
+    try {
+      const saved = GM_getValue(HISTORY_KEY,'[]');
+      const events = typeof saved === 'string' ? JSON.parse(saved) : saved;
+      const cutoff = Date.now() - HISTORY_RETENTION_MS;
+      return Array.isArray(events) ? events.filter(e=>e && Number.isFinite(e.time) && e.time>=cutoff) : [];
+    } catch { return []; }
+  }
+  function logActivity(state, kind, httpStatus) {
+    try {
+      const events=activityEvents();
+      events.push({time:Date.now(),company:state.companyPath,kind,status:httpStatus});
+      GM_setValue(HISTORY_KEY,JSON.stringify(events.slice(-HISTORY_MAX_EVENTS)));
+    } catch { /* 保存制限があっても収集結果そのものは失わない */ }
+  }
+  function activitySummary() {
+    const e=activityEvents(), t=Date.now();
+    const hour=e.filter(x=>x.time>=t-60*60*1000);
+    const day=e.filter(x=>x.time>=t-24*60*60*1000);
+    return {hour:hour.length,day:day.length,companiesHour:new Set(hour.map(x=>x.company)).size,
+      companiesDay:new Set(day.map(x=>x.company)).size,
+      last429:[...e].reverse().find(x=>x.status===429) || null};
+  }
+  function retryAfterInfo(raw,base=Date.now()) {
+    const value = S(raw).trim();
+    if (!value) return {raw:'',retryAt:null};
+    let t=null;
+    if (/^\d+$/.test(value)) {
+      const seconds=Number(value);
+      if (Number.isSafeInteger(seconds)) t=base+seconds*1000;
+    } else {
+      const parsed=Date.parse(value);
+      if (Number.isFinite(parsed)) t=parsed;
+    }
+    return {raw:value,retryAt:Number.isFinite(t)?t:null};
+  }
+  function formatLocalTime(ms) {
+    return ms && Number.isFinite(ms) ? new Date(ms).toLocaleString('ja-JP') : '不明';
   }
   const COMMON = [['fetchedAt','取得日時'],['companyId','企業ID'],['companyName','企業名']];
   const SUMMARY_HEADERS = [...COMMON, ['companyUrl','企業ページURL'],
@@ -238,7 +305,10 @@
     ['expectedFaqCount','質問総数'],['collectedReviews','取得クチコミ数'],
     ['collectedQuestions','取得質問数'],['collectedAnswers','取得回答数'],
     ['expectedAnswers','確認済み質問の回答総数'],['reviewStatus','クチコミ取得状態'],
-    ['faqStatus','質問箱取得状態'],['warnings','注意事項']];
+    ['faqStatus','質問取得状態'],['answerStatus','回答取得状態'],
+    ['requestTotal','送信リクエスト総数'],['requestReviews','クチコミ一覧リクエスト'],
+    ['requestFaq','質問一覧リクエスト'],['requestDetails','質問詳細リクエスト'],
+    ['requestLegacy','旧版未分類リクエスト'],['warnings','注意事項']];
   const REVIEW_HEADERS = [...COMMON, ['reviewId','クチコミID'],['reviewUid','クチコミUID'],
     ['reviewUrl','クチコミURL'],['submissionDate','投稿日'],['title','タイトル'],
     ['jobTitle','職種名'],['normJobTitle','正規化職種名'],['location','勤務地'],
@@ -269,6 +339,9 @@
         collectedReviews:c.reviews, collectedQuestions:c.questions, collectedAnswers:c.answers,
         expectedAnswers: ['both','faq'].includes(state.options.target) ? c.expectedAnswers : '',
         reviewStatus:summaryStatus(state,'reviews'),faqStatus:summaryStatus(state,'faq'),
+        answerStatus:summaryStatus(state,'answers'),requestTotal:state.requestCount||0,
+        requestReviews:state.requestCounts?.reviews||0,requestFaq:state.requestCounts?.faq||0,
+        requestDetails:state.requestCounts?.details||0,requestLegacy:state.requestCounts?.legacy||0,
         warnings:state.warnings.join(' / ') || state.error }]};
     }
     if (kind === 'reviews') return {headers:REVIEW_HEADERS, rows:Object.values(state.reviews)
@@ -314,8 +387,24 @@
     if (state.requestCount >= MAX_REQUESTS) throw new Error(`安全上限${MAX_REQUESTS}リクエストに達したため停止しました。`);
     const u = safeUrl(url,state.companyPath);
     if (!u) throw new Error('別企業または無効なURLへの移動を拒否しました。');
+    const kind = ['reviews','faq','details'].includes(state.stage) ? state.stage : 'legacy';
     state.lastUrl=u;state.requestCount++;
-    const response = await fetch(u,{credentials:'same-origin',redirect:'follow',headers:{Accept:'text/html,application/xhtml+xml'}});
+    state.requestCounts ||= {reviews:0,faq:0,details:0,legacy:0};
+    state.requestCounts[kind] = (state.requestCounts[kind]||0)+1;
+    let response;
+    try {
+      response = await fetch(u,{credentials:'same-origin',redirect:'follow',headers:{Accept:'text/html,application/xhtml+xml'}});
+    } catch (e) {
+      logActivity(state,kind,'network-error');
+      throw e;
+    }
+    logActivity(state,kind,response.status);
+    if (response.status===429) {
+      const info=retryAfterInfo(response.headers.get('Retry-After'));
+      const err=new Error(`HTTP 429（アクセス制限）：${u}`);
+      err.httpStatus=429;err.retryAfter=info.raw;err.retryAt=info.retryAt;
+      throw err;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}：${u}`);
     if (!response.url || !safeUrl(response.url,state.companyPath)) throw new Error('企業ページ以外へリダイレクトされました。');
     const ct = response.headers.get('content-type') || '';
@@ -413,7 +502,12 @@
         state.status='done';state.stage='done';state.updatedAt=now();save(state);render();
       }
     } catch(e) {
-      state.status = 'error'; state.error = S(e?.message || e);
+      state.status = e?.httpStatus===429 ? 'rate_limited' : 'error';
+      state.error = S(e?.message || e);
+      if (e?.httpStatus===429) {
+        state.rateLimit={detectedAt:now(),retryAfter:S(e.retryAfter),retryAt:e.retryAt||null,
+          requestUrl:state.lastUrl};
+      }
       addWarning(state,`収集停止：${state.error}`);save(state);render();
     }
   }
@@ -421,7 +515,8 @@
   // HTMLのローカルサンプルを使う回帰テストの入口。実ユーザー環境では有効にならない。
   if (typeof globalThis !== 'undefined' && globalThis.__ICH_TEST_MODE__ === true) {
     globalThis.__ICH_TEST_API__ = {reviewsExtract,questionsExtract,answersExtract,nextReviewUrl,
-      newState,counts,summaryStatus,outputRows,toTSV,mergeQuestion,safeUrl,runCollection};
+      newState,counts,summaryStatus,outputRows,toTSV,mergeQuestion,safeUrl,runCollection,
+      normalizeState,activityEvents,activitySummary,retryAfterInfo,requestHtml};
     return;
   }
 
@@ -439,6 +534,7 @@
   function write(keyName,value) {GM_setValue(keyName,JSON.stringify(value));}
   let options={...DEFAULTS,...read(optionsKey,{})};
   let state=read(key,null);
+  if (state && normalizeState(state)) write(key,state);
   let uiOpen=read(uiKey,true);
   let interrupted=false, busy=false;
   if(state?.status==='running') {state.status='paused'; addWarning(state,'前回の取得はページ移動・終了により中断されました。再開できます。');write(key,state);}
@@ -480,6 +576,7 @@
       <label><input type="radio" name="answers" value="full"> 全回答（不足分は詳細取得）</label>
       <label><input type="radio" name="answers" value="list"> 一覧の代表回答のみ</label></div></section>
     <section><div class="label">取得状況</div><div class="stats" id="stats"></div>
+      <div class="stats" id="history" style="margin-top:8px"></div>
       <div class="buttons"><button type="button" class="btn primary" id="start">新規取得</button><button type="button" class="btn" id="pause">一時停止</button><button type="button" class="btn" id="resume">再開</button></div>
       <div id="warnings" class="warn"></div></section>
     <section><div class="label">TSV出力</div>
@@ -512,15 +609,26 @@
     $('#answers-area').style.display=effective.target==='reviews'?'none':'';
     const c=state?counts(state):{reviews:0,questions:0,answers:0,expectedAnswers:0};
     const phase=({reviews:'クチコミ収集',faq:'質問一覧収集',details:'質問詳細収集',done:'終了'})[state?.stage]||'未開始';
-    let status=({running:'取得中',paused:'一時停止',done:'取得終了',error:'取得エラー'})[state?.status]||'未取得';
+    let status=({running:'取得中',paused:'一時停止',done:'取得終了',error:'取得エラー',rate_limited:'HTTP 429で停止'})[state?.status]||'未取得';
     if(state?.status==='done' && state.warnings.length) status='取得終了（要確認）';
     const runOpts = state?.options || effective;
     const limitText=runOpts.scope==='one'?'各一覧先頭1ページ':'全ページ';
-    $('#stats').textContent=`状態：${status} ／ ${phase}\n実行範囲：${limitText}\nクチコミ：${c.reviews}件（${state?.reviewPages||0}ページ） 【${summaryStatus(state,'reviews')}】\n質問：${c.questions}件（${state?.faqPages||0}ページ） 【${summaryStatus(state,'faq')}】\n回答：${c.answers}件 / 確認済み総数${c.expectedAnswers}件\n送信リクエスト：${state?.requestCount||0}回`;
+    const rc=state?.requestCounts||{};
+    $('#stats').textContent=`状態：${status} ／ ${phase}\n実行範囲：${limitText}\nクチコミ：${c.reviews}件（${state?.reviewPages||0}ページ） 【${summaryStatus(state,'reviews')}】\n質問：${c.questions}件（${state?.faqPages||0}ページ） 【${summaryStatus(state,'faq')}】\n回答：${c.answers}件 / 表示回答総数${c.expectedAnswers}件 【${summaryStatus(state,'answers')}】\n送信リクエスト：${state?.requestCount||0}回（クチコミ${rc.reviews||0}・質問一覧${rc.faq||0}・質問詳細${rc.details||0}・旧版未分類${rc.legacy||0}）`;
+    const history=activitySummary();
+    const last429=history.last429 ? `\n直近429：${formatLocalTime(history.last429.time)}（${decodeURIComponent(history.last429.company).slice(0,50)}）` : '';
+    let limitInfo='';
+    if (state?.status==='rate_limited') {
+      const rl=state.rateLimit||{};
+      limitInfo=`\nサーバー指定Retry-After：${rl.retryAfter||'なし'}\n再開指定日時：${rl.retryAt?formatLocalTime(rl.retryAt):'不明（自動再試行しません）'}`;
+    }
+    $('#history').textContent=`このブラウザの収集通信履歴（v1.0.1以降）\n直近1時間：${history.hour}回／${history.companiesHour}社\n直近24時間：${history.day}回／${history.companiesDay}社${last429}${limitInfo}`;
     $('#warnings').textContent=(state?.error ? 'エラー：'+state.error+'\n':'') + (state?.warnings||[]).slice(-4).join('\n');
     $('#start').disabled=isRunning;
     $('#pause').disabled=!isRunning;
-    $('#resume').disabled=busy || !state || !['paused','error'].includes(state.status);
+    const waitingUntil=state?.status==='rate_limited' && state.rateLimit?.retryAt && Date.now()<state.rateLimit.retryAt;
+    $('#resume').disabled=busy || !state || !['paused','error','rate_limited'].includes(state.status) || Boolean(waitingUntil);
+    $('#resume').textContent=state?.status==='rate_limited'?'再開（制限確認）':'再開';
     $('#clear').disabled=isRunning;
     $$('[data-copy],[data-save]').forEach(el => el.disabled=!state);
   }
@@ -550,6 +658,14 @@
   });
   $('#resume').addEventListener('click',()=>{
     if(busy || !state)return;
+    if(state.status==='rate_limited') {
+      if (state.rateLimit?.retryAt && Date.now()<state.rateLimit.retryAt) {
+        toast('Retry-Afterによりサーバー指定の待機中です。');return;
+      }
+      if (!window.confirm('前回HTTP 429でアクセス制限を受けました。サーバーの利用条件とアクセス許可を確認しましたか？解除を保証できません。取得済みデータを保持して未取得地点から手動で再開しますか？')) return;
+      state.error='';
+      state.warnings=state.warnings.filter(w=>!w.startsWith('収集停止：'));
+    }
     if(state.status==='error') {
       // エラーが発生したページは未訪問のまま残されている。復帰可能な場合のみ再実行。
       state.error='';
