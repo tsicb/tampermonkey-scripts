@@ -6,8 +6,8 @@ Tampermonkey用ユーザースクリプトを管理するリポジトリです�
 
 | ファイル | 現行版 | 対象・主な用途 |
 | --- | --- | --- |
-| [indeed-helper-batch-export.user.js](./indeed-helper-batch-export.user.js) | v2.4.5 | Indeedの求人検索結果・求人詳細を取得し、営業用・分析用・フルTSVなどを出力 |
-| [indeed-company-helper.user.js](./indeed-company-helper.user.js) | v1.1.0 | Indeedの企業クチコミ・質問箱を収集し、企業サマリー・クチコミ明細・質問回答明細をTSV出力 |
+| [indeed-helper-batch-export.user.js](./indeed-helper-batch-export.user.js) | v2.4.6 | Indeedの求人検索結果・求人詳細を取得し、営業用・分析用・フルTSVなどを出力 |
+| [indeed-company-helper.user.js](./indeed-company-helper.user.js) | v1.1.1 | Indeedの企業クチコミ・質問箱を収集し、企業サマリー・クチコミ明細・質問回答明細をTSV出力 |
 | [sasuke-company-link-toolbar.user.js](./sasuke-company-link-toolbar.user.js) | v1.6.3 | サスケ企業詳細から、社内ツール・AI調査・求人媒体検索へアクセスするツールバー |
 | [sasuke-phone-link-ui.user.js](./sasuke-phone-link-ui.user.js) | v1.1.5 | サスケの電話番号・対応履歴内URLをリンク化し、非公開PhoneBridge Coreへ発信要求を通知 |
 
@@ -22,11 +22,13 @@ TampermonkeyをインストールしたブラウザでRaw URLを開き、イン�
 
 ## 各スクリプトについて
 
-### Indeed求人取得Helper — `indeed-helper-batch-export.user.js`（v2.4.5）
+### Indeed求人取得Helper — `indeed-helper-batch-export.user.js`（v2.4.6）
 
 Indeedの求人検索結果や詳細ページを読み取り、収集結果をTSVにまとめる補助ツールです。
 
-**表示対象：** 企業ページ（`/cmp/` 以下）では通常Helperのパネルを表示しません。企業クチコミ・質問箱では専用の「Indeed企業情報Helper」を使います。求人ページへ戻った場合は、通常Helperの前回の折り畳み状態・保存データを保ったまま表示が復帰します。
+**表示対象：** 企業ページ（`/cmp/` 以下）では通常Helperのパネル・右端タブを表示しません。企業クチコミ・質問箱では専用の「Indeed企業情報Helper」を使います。求人ページへ戻った場合は、通常Helperの前回の開閉状態・保存データを保ったまま表示が復帰します。
+
+**開閉UI（v2.4.6）：** 通常Helperの右上「×」で閉じると、画面右端に縦型「Indeed Helper」タブだけが残ります。タブをクリックするとパネルが開きます。従来の開閉設定（localStorage）をそのまま使用し、ページ移動・ブラウザ再起動でも前回状態を維持します。閉じても進行中の取得処理は停止しません。
 
 - 検索結果の単一ページ・指定ページ数・全ページ収集、求人詳細の一括取得
 - ページ送り時の設定保持、取得進捗の表示、途中停止・再開
@@ -36,14 +38,14 @@ Indeedの求人検索結果や詳細ページを読み取り、収集結果をTS
 
 **注意：** HTMLやIndeedの画面構成が変わると、取得できる項目やページ巡回に影響する場合があります。全文列と項目別列を照合し、取得結果を確認してください。
 
-### Indeed企業情報Helper — `indeed-company-helper.user.js`（v1.1.0）
+### Indeed企業情報Helper — `indeed-company-helper.user.js`（v1.1.1）
 
 Indeed企業ページのクチコミ（`/cmp/.../reviews`）と質問箱（`/cmp/.../faq`）、質問詳細ページで起動する独立したツールです。既存の求人取得Helperとは保存データ・操作UIが別です。
 
 - 取得対象：**クチコミ／質問箱／両方**
 - 取得範囲：**全ページ／各一覧の先頭1ページ**
 - 質問箱：**質問詳細の先頭ページまで取得／一覧の代表回答のみ**（詳細ページの2ページ目以降を自動巡回しません）
-- **企業サマリー／クチコミ明細／質問・回答明細**の3種類のTSVコピー・保存
+- **企業サマリー／クチコミ明細／質問・回答明細**の3種類のTSVコピー・保存。v1.1.1から企業サマリーの「コピー」だけは「項目／値」の縦型2列で貼り付け可能。サマリーの「保存」は従来の横型TSVを維持
 - 投稿・質問・回答のIDで重複を排除し、回答がない質問も出力
 - 企業ごとの取得状態の保存、一時停止・再開、件数照合と警告表示
 - 通信回数をクチコミ一覧／質問一覧／質問詳細に分けて表示。企業横断で直近1時間・24時間の通信回数と企業数を記録
