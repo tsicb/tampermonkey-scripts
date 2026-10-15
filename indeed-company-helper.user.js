@@ -2,7 +2,7 @@
 // @name         Indeed Company Helper - Reviews & Q&A
 // @name:ja      Indeed企業情報Helper（クチコミ・質問箱）
 // @namespace    https://github.com/tsicb/tampermonkey-scripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  Collect public Indeed company reviews, company ratings, and question/answer entries into TSV; supports pause/resume and completeness checks.
 // @description:ja Indeed企業ページの公開クチコミ・質問回答をTSV収集（全件照合、一時停止・再開対応）
 // @match        https://jp.indeed.com/cmp/*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VER = '1.1.0';
+  const VER = '1.1.1';
   const PREFIX = 'indeedCompanyHelper_v1_';
   const ROOT_ID = 'ich-root-v1';
   const BASE = 'https://jp.indeed.com';
@@ -533,6 +533,12 @@
     const {headers,rows} = outputRows(state,kind);
     return [headers.map(x=>x[1]).join('\t'), ...rows.map(r=>headers.map(h=>tsvCell(r[h[0]])).join('\t'))].join('\r\n');
   }
+  // サマリーのコピーだけを縦2列で出力する。TSV保存と他の出力は従来形式のまま。
+  function toVerticalSummaryTSV(state) {
+    const {headers,rows} = outputRows(state,'summary');
+    const values = rows[0] || {};
+    return ['項目\t値', ...headers.map(([key,label])=>tsvCell(label)+'\t'+tsvCell(values[key]))].join('\r\n');
+  }
   function addWarning(state, message) {
     if (!state.warnings.includes(message)) state.warnings.push(message);
   }
@@ -760,7 +766,7 @@
       </details>
     </section>
     <section><div class="label">TSV出力</div>
-      <div class="outrow"><button class="btn" data-copy="summary">企業サマリーをコピー</button><button class="btn" data-save="summary">保存</button></div>
+      <div class="outrow"><button class="btn" data-copy="summary">企業サマリーを縦型コピー</button><button class="btn" data-save="summary">保存</button></div>
       <div class="outrow"><button class="btn" data-copy="reviews">クチコミ明細をコピー</button><button class="btn" data-save="reviews">保存</button></div>
       <div class="outrow"><button class="btn" data-copy="faq">質問・回答明細をコピー</button><button class="btn" data-save="faq">保存</button></div>
       <div class="hint">タブ・改行を除去してTSV出力します。元の文章改行は &lt;BR&gt; に変換します。</div>
@@ -862,11 +868,11 @@
   });
   async function copy(kind) {
     if(!state)return;
-    const value=toTSV(state,kind);
+    const value=kind==='summary'?toVerticalSummaryTSV(state):toTSV(state,kind);
     try {
       if(typeof GM_setClipboard === 'function')GM_setClipboard(value,'text');
       else await navigator.clipboard.writeText(value);
-      toast(`${kind==='summary'?'企業サマリー':kind==='reviews'?'クチコミ明細':'質問・回答明細'}をコピーしました。`);
+      toast(`${kind==='summary'?'企業サマリー（縦型）':kind==='reviews'?'クチコミ明細':'質問・回答明細'}をコピーしました。`);
     } catch(e) {toast('コピー失敗：'+S(e?.message||e));}
   }
   function download(kind){
