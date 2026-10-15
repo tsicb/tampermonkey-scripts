@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Indeed Helper Batch Export
 // @namespace    http://tampermonkey.net/
-// @version      2.4.5
+// @version      2.4.6
 // @description  現行Indeedの検索結果・求人詳細を取得し、営業向け・分析・フルTSVと項目定義TSVを出力
 // @match        https://jp.indeed.com/*
 // @grant        GM_setClipboard
@@ -17,6 +17,7 @@
   'use strict';
 
   const PANEL_ID = 'tm-indeed-helper-panel';
+  const PANEL_TAB_ID = 'tm-indeed-helper-open-tab';
   const STYLE_ID = 'tm-indeed-helper-style';
   const BATCH_STATE_KEY = 'tmIndeedBatchState_v7';
   const SEARCH_CRAWL_STATE_KEY = 'tmIndeedSearchCrawlState_v7';
@@ -4922,15 +4923,21 @@
   function applyPanelCollapsedState(collapsed) {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
+    const isClosed = Boolean(collapsed);
+    panel.classList.toggle('tm-collapsed', isClosed);
 
-    panel.classList.toggle('tm-collapsed', Boolean(collapsed));
+    const tab = document.getElementById(PANEL_TAB_ID);
+    if (tab) {
+      tab.hidden = !isClosed;
+      tab.setAttribute('aria-expanded', isClosed ? 'false' : 'true');
+    }
 
     const btn = panel.querySelector('.btn-panel-collapse');
     if (btn) {
-      btn.textContent = collapsed ? '＋' : '−';
-      btn.title = collapsed ? 'Indeed Helperを表示' : 'Indeed Helperを折り畳み';
+      btn.textContent = '×';
+      btn.title = 'Indeed Helperを閉じる';
       btn.setAttribute('aria-label', btn.title);
-      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      btn.setAttribute('aria-expanded', isClosed ? 'false' : 'true');
     }
 
     refreshPanelCollapsedSummary();
@@ -4993,14 +5000,30 @@
         font-family: Arial, sans-serif;
         color: #111827;
       }
+      /* 閉じた時はパネルを隠し、独立した右端の縦型タブだけを表示 */
       #${PANEL_ID}.tm-collapsed {
-        top: 140px;
-        right: 0;
-        width: 190px;
-        padding: 9px 10px;
-        overflow: hidden;
-        border-radius: 12px 0 0 12px;
+        display: none !important;
       }
+      #${PANEL_TAB_ID} {
+        position: fixed;
+        right: 0;
+        top: 44%;
+        z-index: 2147483647;
+        writing-mode: vertical-rl;
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.4;
+        color: #fff;
+        background: #304eb3;
+        padding: 14px 8px;
+        border: none;
+        border-radius: 9px 0 0 9px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+        cursor: pointer;
+      }
+      #${PANEL_TAB_ID}:hover { background: #29449f; }
+      #${PANEL_TAB_ID}[hidden] { display: none !important; }
       #${PANEL_ID} .tm-panel-head {
         display: flex;
         align-items: center;
@@ -5038,9 +5061,7 @@
       #${PANEL_ID}.tm-collapsed .tm-panel-body {
         display: none;
       }
-      #${PANEL_ID}.tm-collapsed .tm-collapsed-summary {
-        display: block;
-      }
+      /* 旧版の折り畳みサマリーは利用せず、縦型タブに一本化 */
       #${PANEL_ID} .tm-group {
         margin-top: 10px;
         padding-top: 10px;
@@ -5190,7 +5211,7 @@
     panel.innerHTML = `
       <div class="tm-panel-head">
         <div class="tm-title">Indeed Helper</div>
-        <button class="btn-panel-collapse" type="button" title="Indeed Helperを折り畳み" aria-label="Indeed Helperを折り畳み" aria-expanded="true">−</button>
+        <button class="btn-panel-collapse" type="button" title="Indeed Helperを閉じる" aria-label="Indeed Helperを閉じる" aria-expanded="true">×</button>
       </div>
       <div class="tm-collapsed-summary">待機中</div>
 
@@ -5305,6 +5326,17 @@
 
     document.body.appendChild(panel);
 
+    const tab = document.createElement('button');
+    tab.id = PANEL_TAB_ID;
+    tab.type = 'button';
+    tab.textContent = 'Indeed Helper';
+    tab.title = 'Indeed Helperを開く';
+    tab.setAttribute('aria-label', tab.title);
+    tab.setAttribute('aria-expanded', 'false');
+    tab.hidden = true;
+    document.body.appendChild(tab);
+    tab.addEventListener('click', () => togglePanelCollapsed());
+
     const rangeSelect = panel.querySelector('.tm-range-select');
     rangeSelect.value = loadSearchRangeSelection();
     rangeSelect.addEventListener('change', () => saveSearchRangeSelection(rangeSelect.value));
@@ -5409,13 +5441,16 @@
     if (!document.body) return;
 
     const existingPanel = document.getElementById(PANEL_ID);
+    const existingTab = document.getElementById(PANEL_TAB_ID);
     if (isIndeedCompanyPage()) {
-      // SPA遷移で残っているパネルも非表示にする。取得済みデータや設定は触らない。
+      // SPA遷移で残っているパネルと右端タブを両方隠す。データと開閉状態は触らない。
       if (existingPanel) existingPanel.style.setProperty('display', 'none', 'important');
+      if (existingTab) existingTab.style.setProperty('display', 'none', 'important');
       return;
     }
-    // 求人ページに戻ったら、元の開閉状態を保ったままパネルを復帰させる。
+    // 求人ページに戻ったら、保存済みの開閉状態を維持して復帰させる。
     if (existingPanel) existingPanel.style.removeProperty('display');
+    if (existingTab) existingTab.style.removeProperty('display');
 
     createPanel();
     refreshStatus();
@@ -5446,6 +5481,6 @@
   });
 
   boot();
-  console.log('Indeed Helper Batch Export v2.4.5: loaded');
+  console.log('Indeed Helper Batch Export v2.4.6: loaded');
 })();
 
